@@ -308,6 +308,8 @@ function cam_armWatchdog(item, ms) {
     }
   }, ms);
 }
+// 表示用の番号はユニットNoのみ（部品Noの連番は表示しない）。unitNo が無い行は従来の number を使う。
+function cam_dispNo(r) { return (r && (r.unitNo || r.number)) || ''; }
 function cam_applySearchResult(item, results, queryText) {
   item.results = results || [];
   item.selIndex = 0;
@@ -541,10 +543,10 @@ function renderCamCard(id) {
   let summaryHtml = '';
   if (item.status === 'done' && item.results.length) {
     const top = item.results[item.selIndex] || item.results[0];
-    summaryHtml = '<div class="q-summary">最上位: <b>' + top.number + '</b> ' + top.name + ' ／ ヒット度 ' + top.score + '点 ／ ' + top.checkCount + ' / ' + top.orderCount + ' 個</div>';
+    summaryHtml = '<div class="q-summary">最上位: <b>' + cam_dispNo(top) + '</b> ' + top.name + ' ／ ヒット度 ' + top.score + '点 ／ ' + top.checkCount + ' / ' + top.orderCount + ' 個</div>';
   } else if (item.status === 'registered') {
     const top = item.results[item.selIndex] || item.results[0];
-    summaryHtml = '<div class="q-summary">✅ 登録しました: <b>' + top.number + '</b> ' + top.checkCount + ' / ' + top.orderCount + ' 個</div>';
+    summaryHtml = '<div class="q-summary">✅ 登録しました: <b>' + cam_dispNo(top) + '</b> ' + top.checkCount + ' / ' + top.orderCount + ' 個</div>';
   } else if (item.status === 'nohit') {
     summaryHtml = '<div class="q-summary">該当するデータが見つかりませんでした。「' + item.text + '」</div>';
   } else if (item.status === 'failed') {
@@ -559,7 +561,7 @@ function renderCamCard(id) {
     const sel = item.results[item.selIndex] || item.results[0];
     let candOptions = '';
     item.results.forEach(function(r, i) {
-      candOptions += '<option value="' + i + '"' + (i === item.selIndex ? ' selected' : '') + '>' + (i + 1) + '位 ' + r.number + '（' + r.score + '点）</option>';
+      candOptions += '<option value="' + i + '"' + (i === item.selIndex ? ' selected' : '') + '>' + (i + 1) + '位 ' + cam_dispNo(r) + '（' + r.score + '点）</option>';
     });
     const extraHtml = sel.extraModelText ? '<div style="font-weight:bold; font-size:14px; color:#1565c0; margin-bottom:4px;">' + sel.extraModelText + '</div>' : '';
     const modelHtml = sel.displayModel ? '<div style="font-weight:bold; font-size:15px;">型式寸法: <span style="color:#333;">' + sel.displayModel + '</span></div>' : '';
@@ -581,7 +583,7 @@ function renderCamCard(id) {
     }
     detailHtml = '<div class="q-detail">'
       + '<div class="q-row"><span style="font-size:13px; font-weight:bold;">候補:</span><select onchange="camSelectCandidate(\'' + item.id + '\', this.value)">' + candOptions + '</select></div>'
-      + '<div class="q-title">' + sel.number + '</div>' + extraHtml + modelHtml
+      + '<div class="q-title">' + cam_dispNo(sel) + '</div>' + extraHtml + modelHtml
       + '<div style="font-size:14px; margin-top:4px;">品名: ' + sel.name + '</div>'
       + btnHtml
       + (item.regError ? '<div class="q-err">' + item.regError + '</div>' : '')
@@ -617,7 +619,7 @@ function camRegister(id) {
   const qtyEl = document.getElementById('cam-add-qty-' + id);
   const qty = qtyEl ? qtyEl.value : '1';
   const boxLabel = currentBox ? ('箱: ' + currentBox) : '箱なし';
-  if (!confirm('登録しますか？\n' + sel.number + ' ' + sel.name + '\n' + qty + '個 ／ ' + boxLabel)) return;
+  if (!confirm('登録しますか？\n' + cam_dispNo(sel) + ' ' + sel.name + '\n' + qty + '個 ／ ' + boxLabel)) return;
   item.status = 'registering';
   item.regError = '';
   renderCamCard(id);
@@ -647,7 +649,7 @@ function camCancel(id) {
   const sel = item.results[item.selIndex] || item.results[0];
   const qtyEl = document.getElementById('cam-cancel-qty-' + id);
   const cancelVal = qtyEl ? qtyEl.value : 'ALL_CANCEL';
-  if (!confirm('取り消しますか？\n' + sel.number + ' ' + sel.name + '\n取消: ' + cancelVal)) return;
+  if (!confirm('取り消しますか？\n' + cam_dispNo(sel) + ' ' + sel.name + '\n取消: ' + cancelVal)) return;
   item.status = 'registering';
   item.regError = '';
   renderCamCard(id);
