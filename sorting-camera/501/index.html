@@ -1,0 +1,799 @@
+<!DOCTYPE html>
+<!-- 仕分けツール 5.0.1 連続撮影カメラページ（単体HTML・静的ホスティング用）。
+     GitHub Pages（sorting-camera/501/）に置く。GAS のサンドボックス iframe 内では
+     getUserMedia が使えないため、カメラはこのページ（トップレベル）で動かす。
+     OCR（Stage 11 の2パス）はこのページ内で行い、検索・登録・取消は 5.0.1 の exec URL へ
+     直接 fetch POST する（doPost）。GAS タブがバックグラウンド／閉じていても進む。
+     GAS アプリ（index.html）との postMessage 連携は無い。通信に失敗した場合は
+     その場で失敗表示にする（フォールバックはしない）。
+     製番（対象シート）は上の欄で選ぶ。空のまま検索は送らない（5.0.1 には実データ
+     A260016MK が入っているため、全シート検索をさせない）。
+     QR 検出はブラウザ内蔵の BarcodeDetector を使う。外部のスクリプト・画像・フォントは読み込まない。
+     Vision APIキーは ver.X のカメラページと同一（最終段階の移行までは現状維持）。
+     既知の制限: このページからの登録ではタイムログの記録と Z番号完了の検出は行わない。
+     監査ログはサーバー側で書かれる。 -->
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>連続撮影カメラ（5.0.1・試験的）</title>
+<style>
+  body { font-family: sans-serif; text-align: center; margin: 0; padding: 10px; background: #263238; color: #fff; }
+  h1 { font-size: 17px; margin: 8px 0; }
+  #topBar { background: #37474f; border-radius: 8px; padding: 10px; text-align: left; margin-bottom: 10px; }
+  #boxBadge { font-size: 16px; font-weight: bold; }
+  #boxBadge.active { color: #b9f6ca; }
+  #qrBtn { display: none; width: 100%; margin-top: 8px; padding: 14px; font-size: 16px; font-weight: bold; border: none; border-radius: 8px; background: #7b1fa2; color: #fff; cursor: pointer; }
+  #qrBtn:disabled { background: #78909c; }
+  #boxManual { display: flex; gap: 8px; margin-top: 8px; }
+  #boxManual input { flex: 1; font-size: 15px; padding: 10px; border-radius: 8px; border: none; }
+  #boxManual button { font-size: 14px; font-weight: bold; padding: 10px 14px; border: none; border-radius: 8px; background: #00897b; color: #fff; cursor: pointer; }
+  #camWrap { position: relative; max-width: 640px; margin: 0 auto; touch-action: manipulation; cursor: pointer; }
+  #cam { width: 100%; max-width: 640px; border-radius: 8px; background: #000; display: block; }
+  #camFrame { position: absolute; left: 6%; top: 8%; width: 88%; height: 84%; border: 3px solid rgba(255,255,255,0.85); border-radius: 8px; pointer-events: none; box-sizing: border-box; }
+  #flash { position: absolute; left: 0; top: 0; width: 100%; height: 100%; background: #fff; opacity: 0; pointer-events: none; transition: opacity 0.15s; border-radius: 8px; }
+  .row { margin-top: 12px; }
+  .shutter { width: 92px; height: 92px; border-radius: 50%; border: 5px solid #fff; background: #00897b; color: #fff; font-size: 15px; font-weight: bold; cursor: pointer; }
+  .shutter:disabled { background: #78909c; }
+  .sub { padding: 12px 18px; font-size: 15px; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; background: #546e7a; color: #fff; margin: 4px; }
+  #log { margin-top: 12px; font-size: 14px; font-weight: bold; background: #37474f; padding: 10px; border-radius: 8px; text-align: left; min-height: 20px; word-break: break-all; }
+  #shotCount { margin-top: 8px; font-size: 13px; color: #b0bec5; }
+  .err { background: #ffebee; color: #c62828; font-weight: bold; padding: 12px; border-radius: 8px; text-align: left; margin-bottom: 10px; }
+  .warn { background: #fff8e1; color: #e65100; font-weight: bold; padding: 12px; border-radius: 8px; text-align: left; margin-bottom: 10px; font-size: 14px; }
+  .hint { font-size: 12px; color: #b0bec5; margin-top: 10px; text-align: left; }
+  #queueSection { margin-top: 14px; text-align: left; }
+  #queueSection h2 { font-size: 15px; margin: 0 0 8px 0; color: #b9f6ca; }
+  .card { background: #fff; color: #263238; border-radius: 8px; padding: 10px; margin-bottom: 10px; border-left: 5px solid #00897b; }
+  .card.registered { border-left-color: #2e7d32; background: #e8f5e9; }
+  .q-head { display: flex; gap: 10px; align-items: center; cursor: pointer; }
+  .q-thumb { width: 72px; height: 72px; object-fit: cover; border-radius: 6px; border: 1px solid #cfd8dc; background: #eceff1; flex: none; }
+  .q-text { font-size: 14px; font-weight: bold; word-break: break-all; flex: 1; }
+  .q-status { font-size: 12px; font-weight: bold; padding: 3px 8px; border-radius: 10px; background: #eceff1; color: #455a64; white-space: nowrap; }
+  .q-status.st-searching { background: #e3f2fd; color: #1565c0; }
+  .q-status.st-done { background: #e8f5e9; color: #2e7d32; }
+  .q-status.st-failed { background: #ffebee; color: #c62828; }
+  .q-del { background: none; border: none; font-size: 18px; cursor: pointer; color: #78909c; padding: 4px 8px; flex: none; }
+  .q-summary { font-size: 13px; color: #37474f; margin-top: 8px; }
+  .q-detail { margin-top: 10px; border-top: 1px dashed #b0bec5; padding-top: 10px; }
+  .q-title { font-size: 22px; font-weight: bold; color: #c62828; }
+  .q-row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+  .q-row select { flex: 1; font-size: 15px; padding: 8px; }
+  .q-btn { flex: 2; padding: 12px; font-size: 16px; font-weight: bold; border: none; border-radius: 6px; color: #fff; background: #2e7d32; cursor: pointer; }
+  .q-btn.cancel { flex: 1; background: #c62828; }
+  .q-btn:disabled { background: #90a4ae; }
+  .q-err { color: #c62828; font-size: 13px; font-weight: bold; margin-top: 6px; }
+</style>
+</head>
+<body>
+<h1>📷 連続撮影カメラ（5.0.1・試験的）</h1>
+<div id="warnBox" class="warn" style="display:none"></div>
+<div id="errBox" class="err" style="display:none"></div>
+
+<div id="topBar">
+  <div id="boxBadge">📦 現在の箱: 未設定（箱なし）</div>
+  <div id="sheetRow" style="display:flex; gap:8px; margin-top:8px; align-items:center;">
+    <label for="sheetInput" style="font-size:14px; font-weight:bold; white-space:nowrap;">製番:</label>
+    <input id="sheetInput" type="text" value="A200001UR" autocomplete="off" style="flex:1; font-size:15px; padding:10px; border-radius:8px; border:none;">
+  </div>
+  <button id="qrBtn"></button>
+  <div id="boxManual">
+    <input id="boxInput" type="text" placeholder="箱を手入力（QRが読めないとき）">
+    <button id="boxSetBtn">箱を設定</button>
+  </div>
+  <div id="qrNote" style="display:none; font-size:12px; color:#ffcc80; margin-top:6px;"></div>
+</div>
+
+<div id="camWrap">
+  <video id="cam" autoplay playsinline muted></video>
+  <div id="camFrame"></div>
+  <div id="flash"></div>
+</div>
+<div class="row"><button id="shutterBtn" class="shutter" disabled>📷 撮影</button></div>
+<div class="row">
+  <button id="torchBtn" class="sub" style="display:none">🔦 トーチ ON</button>
+  <button id="closeBtn" class="sub">終了</button>
+</div>
+<div id="log">カメラを起動しています…</div>
+<div id="shotCount"></div>
+
+<div id="queueSection">
+  <h2>📷 撮影キュー <span id="queueCount"></span></h2>
+  <div id="queueArea"></div>
+  <div id="queueEmpty" style="font-size:12px; color:#b0bec5;">まだ撮影がありません。シャッターを押すと、ここに結果が積み重なります。</div>
+</div>
+
+<div class="hint">このページは撮影専用です。検索・登録はこのページが 5.0.1 の仕分けアプリに直接問い合わせて行います（元のアプリを閉じていても動きます）。製番は上の欄で選んだシートに固定されます。元のアプリは CSV・リスト管理用です。映像の枠内をタップしても撮影できます。カメラは「終了」で解放してください。</div>
+<script>
+// ---------- 通信 ----------
+// このページは 5.0.1 の exec URL（doPost）へ直接 fetch POST する。
+// GAS アプリ（index.html）との postMessage 連携は無い（5.0.1 のアプリ側に
+// カメラ用の受信処理が無いため）。通信に失敗したらその場で失敗表示にする。
+let currentBox = '';
+
+// ---------- 直接通信（exec URL への fetch POST） ----------
+// このページから 5.0.1 の exec URL（doPost）へ直接問い合わせる。
+// Content-Type を text/plain にしているのはプリフライト（OPTIONS）を避けるため。
+const CAMERA_API_URL = "https://script.google.com/macros/s/AKfycby2lXFxUBHKoKHMA8t7DpCcdm4ytJ31K8667L7M6bVlouO-kFWH8KPXeASaZOB3gsZbnQ/exec";
+const CAM_API_TIMEOUT_MS = 20000;
+const VISION_API_KEY = "AIzaSyCle1_tGfXl9tszEp_sW_CoSy5m2A2GPcI";
+const ST11_PASS1_MAX = 1600;
+const ST11_PASS1_QUALITY = 0.85;
+const ST11_CROP_PAD = 24;
+const ST11_CROP_QUALITY = 0.9;
+const ST11_OCR_TIMEOUT_MS = 20000;
+async function camApi(action, body) {
+  const controller = new AbortController();
+  const timer = setTimeout(function() { controller.abort(); }, CAM_API_TIMEOUT_MS);
+  try {
+    const payload = Object.assign({}, body || {}, { action: action });
+    const res = await fetch(CAMERA_API_URL, {
+      method: 'POST', headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify(payload), signal: controller.signal
+    });
+    const data = await res.json();
+    if (!data || data.ok === false) throw new Error((data && data.error) || 'サーバーエラーが発生しました。');
+    return data;
+  } finally { clearTimeout(timer); }
+}
+// ---------- 製番（対象シート）の選択 ----------
+// 5.0.1 のシートには実データ（A260016MK）が入っているため、検索は必ず
+// ここで選んだ製番タブに対して行う。空のまま検索は送らない。
+// 初期値は A200001UR（テスト製番）。変更は localStorage に保存する。
+const SHEET_KEY = 'st13fix_targetSheet';
+function getTargetSheet() {
+  const el = document.getElementById('sheetInput');
+  return el ? el.value.trim() : '';
+}
+(function initSheetInput() {
+  const el = document.getElementById('sheetInput');
+  if (!el) return;
+  try {
+    const saved = localStorage.getItem(SHEET_KEY);
+    if (saved) el.value = saved;
+  } catch (e) {}
+  el.addEventListener('change', function() {
+    try { localStorage.setItem(SHEET_KEY, el.value.trim()); } catch (e) {}
+  });
+})();
+// verx-index.html の verx_parseQuery と同一規則（数量抽出・全角正規化）。
+function cam_parseQuery(query) {
+  let q = String(query || '').replace(/[Ａ-Ｚａ-ｚ０-９]/g, function(s) {
+    return String.fromCharCode(s.charCodeAt(0) - 0xFEE0);
+  });
+  const qtyRegex = /([0-9]+)\s*(個|pcs|set|sets|ｹ|pieces|コ|ヶ)/i;
+  const m = q.match(qtyRegex);
+  let qty = null;
+  if (m) { qty = parseInt(m[1], 10); q = q.replace(qtyRegex, ' ').trim(); }
+  return { query: q, qty: qty };
+}
+// ---------- Stage 11 OCR（verx-index.html と同一ロジック） ----------
+function st11_extractText(resp) {
+  if (!resp) return '';
+  if (resp.fullTextAnnotation && resp.fullTextAnnotation.text) return resp.fullTextAnnotation.text.trim();
+  if (resp.textAnnotations && resp.textAnnotations.length > 0 && resp.textAnnotations[0].description) return resp.textAnnotations[0].description.trim();
+  return '';
+}
+function st11_wordBoxes(resp) {
+  const out = [];
+  if (!resp || !resp.textAnnotations) return out;
+  for (let i = 1; i < resp.textAnnotations.length; i++) {
+    const a = resp.textAnnotations[i];
+    if (!a.boundingPoly || !a.boundingPoly.vertices) continue;
+    const vs = a.boundingPoly.vertices;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (let k = 0; k < vs.length; k++) {
+      const x = (vs[k].x || 0), y = (vs[k].y || 0);
+      if (x < x0) x0 = x; if (y < y0) y0 = y;
+      if (x > x1) x1 = x; if (y > y1) y1 = y;
+    }
+    if (isFinite(x0) && isFinite(y0) && x1 > x0 && y1 > y0) out.push({x0: x0, y0: y0, x1: x1, y1: y1});
+  }
+  return out;
+}
+function st11_scaleBox(box, scale) {
+  return {x0: box.x0 * scale, y0: box.y0 * scale, x1: box.x1 * scale, y1: box.y1 * scale};
+}
+function st11_clusterBoxes(boxes, gap) {
+  const clusters = [];
+  const sorted = boxes.slice().sort(function(a, b) { return (a.y0 - b.y0) || (a.x0 - b.x0); });
+  sorted.forEach(function(b) {
+    let merged = null;
+    for (let i = 0; i < clusters.length; i++) {
+      const c = clusters[i];
+      if (b.x0 <= c.x1 + gap && b.x1 >= c.x0 - gap && b.y0 <= c.y1 + gap && b.y1 >= c.y0 - gap) { merged = c; break; }
+    }
+    if (merged) {
+      merged.x0 = Math.min(merged.x0, b.x0); merged.y0 = Math.min(merged.y0, b.y0);
+      merged.x1 = Math.max(merged.x1, b.x1); merged.y1 = Math.max(merged.y1, b.y1);
+    } else {
+      clusters.push({x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1});
+    }
+  });
+  return clusters;
+}
+function st11_padBox(box, pad, imgW, imgH) {
+  return {
+    x0: Math.max(0, Math.floor(box.x0 - pad)),
+    y0: Math.max(0, Math.floor(box.y0 - pad)),
+    x1: Math.min(imgW, Math.ceil(box.x1 + pad)),
+    y1: Math.min(imgH, Math.ceil(box.y1 + pad))
+  };
+}
+function st11_resizeImage(img, maxDim, quality) {
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  const scale = Math.min(1, maxDim / Math.max(w, h));
+  const nw = Math.max(1, Math.round(w * scale));
+  const nh = Math.max(1, Math.round(h * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = nw; canvas.height = nh;
+  canvas.getContext('2d').drawImage(img, 0, 0, nw, nh);
+  return { dataUrl: canvas.toDataURL('image/jpeg', quality), scale: scale, width: nw, height: nh };
+}
+async function st11_callVision(base64List, featureType) {
+  const controller = new AbortController();
+  const timer = setTimeout(function() { controller.abort(); }, ST11_OCR_TIMEOUT_MS);
+  try {
+    const response = await fetch("https://vision.googleapis.com/v1/images:annotate?key=" + VISION_API_KEY, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requests: base64List.map(function(b) { return { image: { content: b }, features: [{ type: featureType }] }; }) }),
+      signal: controller.signal
+    });
+    return await response.json();
+  } finally { clearTimeout(timer); }
+}
+// Stage 11 の2パス OCR を Promise で返す（verx-index.html の decodeVisionAPI と同一手順）。
+function camOcrImage(dataUrl) {
+  return new Promise(function(resolve) {
+    const startedAt = Date.now();
+    const img = new Image();
+    img.onload = async function() {
+      try {
+        const origW = img.naturalWidth || img.width;
+        const origH = img.naturalHeight || img.height;
+        const p1 = st11_resizeImage(img, ST11_PASS1_MAX, ST11_PASS1_QUALITY);
+        const r1 = await st11_callVision([p1.dataUrl.split(',')[1]], 'TEXT_DETECTION');
+        const resp1 = (r1.responses && r1.responses[0]) || {};
+        const words = st11_wordBoxes(resp1);
+        let queryText = '';
+        if (words.length === 0) {
+          const rF = await st11_callVision([dataUrl.split(',')[1]], 'TEXT_DETECTION');
+          queryText = st11_extractText((rF.responses && rF.responses[0]) || {});
+        } else {
+          const scale = 1 / p1.scale;
+          const origBoxes = words.map(function(b) { return st11_scaleBox(b, scale); });
+          const gap = Math.max(60, Math.round(origW * 0.05));
+          const clusters = st11_clusterBoxes(origBoxes, gap);
+          const crops = [];
+          clusters.forEach(function(c) {
+            const box = st11_padBox(c, ST11_CROP_PAD, origW, origH);
+            const cw = box.x1 - box.x0, ch = box.y1 - box.y0;
+            if (cw < 10 || ch < 10) return;
+            const canvas = document.createElement('canvas');
+            canvas.width = cw; canvas.height = ch;
+            canvas.getContext('2d').drawImage(img, box.x0, box.y0, cw, ch, 0, 0, cw, ch);
+            crops.push(canvas.toDataURL('image/jpeg', ST11_CROP_QUALITY).split(',')[1]);
+          });
+          if (crops.length === 0) {
+            queryText = st11_extractText(resp1);
+          } else {
+            const r2 = await st11_callVision(crops, 'TEXT_DETECTION');
+            const texts = [];
+            (r2.responses || []).forEach(function(r) {
+              const t = st11_extractText(r);
+              if (t) texts.push(t);
+            });
+            queryText = texts.join(' ').trim();
+            if (!queryText) queryText = st11_extractText(resp1);
+          }
+        }
+        resolve({ text: queryText, secs: ((Date.now() - startedAt) / 1000).toFixed(1) });
+      } catch (err) {
+        resolve({ text: '', secs: ((Date.now() - startedAt) / 1000).toFixed(1) });
+      }
+    };
+    img.onerror = function() { resolve({ text: '', secs: 0 }); };
+    img.src = dataUrl;
+  });
+}
+// 応答が無いカードを失敗にするタイマー（OCR と検索で掛け直す）。
+function cam_armWatchdog(item, ms) {
+  if (item.watchdog) clearTimeout(item.watchdog);
+  item.watchdog = setTimeout(function() {
+    const it = camFind(item.id);
+    if (it && (it.status === 'sending' || it.status === 'searching')) {
+      it.status = 'failed';
+      it.error = '応答がありません。通信状況を確認して、もう一度撮影してください。';
+      renderCamCard(item.id);
+    }
+  }, ms);
+}
+function cam_applySearchResult(item, results, queryText) {
+  item.results = results || [];
+  item.selIndex = 0;
+  item.status = item.results.length ? 'done' : 'nohit';
+  if (!item.results.length) item.error = '該当なし';
+  renderCamCard(item.id);
+}
+// 直接通信で検索する。失敗時は postMessage 経由（GAS タブ）へフォールバックする。
+async function cam_processShot(item) {
+  let ocr;
+  try { ocr = await camOcrImage(item.image); } catch (e) { ocr = { text: '' }; }
+  if (!ocr.text) {
+    item.status = 'failed';
+    item.error = '文字を検出できませんでした。';
+    renderCamCard(item.id);
+    return;
+  }
+  item.text = ocr.text;
+  item.ocrSecs = ocr.secs;
+  renderCamCard(item.id);
+  const parsed = cam_parseQuery(ocr.text);
+  item.detectedQty = parsed.qty;
+  const targetSheet = getTargetSheet();
+  if (!targetSheet) {
+    item.status = 'failed';
+    item.error = '製番（対象シート）が入力されていません。上の製番欄に入力してください。';
+    renderCamCard(item.id);
+    return;
+  }
+  cam_armWatchdog(item, 30000);
+  try {
+    const data = await camApi('search', { query: parsed.query, targetSheet: targetSheet, targetBox: '', targetZNo: '' });
+    cam_applySearchResult(item, data.results || [], item.text);
+    setLog('⚡ OCR抽出(' + (ocr.secs || '?') + '秒): ' + ocr.text);
+  } catch (err) {
+    item.status = 'failed';
+    item.error = 'サーバーとの直接通信に失敗しました。通信状況を確認して、もう一度撮影してください。';
+    renderCamCard(item.id);
+    setLog('サーバーとの直接通信に失敗しました。');
+  }
+}
+
+function setBoxBadge(box) {
+  currentBox = box || '';
+  const el = document.getElementById('boxBadge');
+  if (currentBox) {
+    el.innerText = '📦 現在の箱: ' + currentBox;
+    el.classList.add('active');
+  } else {
+    el.innerText = '📦 現在の箱: 未設定（箱なし）';
+    el.classList.remove('active');
+  }
+  if (qrButtonValue && qrButtonValue === currentBox) hideQrButton();
+}
+
+// ---------- QR 自動検出（箱設定） ----------
+let lastQrValue = '';
+let qrButtonValue = '';
+const qrBtn = document.getElementById('qrBtn');
+function showQrButton(value) {
+  qrButtonValue = value;
+  qrBtn.innerText = '📦 箱: ' + value + ' — タップで設定';
+  qrBtn.disabled = false;
+  qrBtn.style.display = 'block';
+}
+function hideQrButton() {
+  qrButtonValue = '';
+  qrBtn.style.display = 'none';
+}
+qrBtn.addEventListener('click', function() {
+  if (!qrButtonValue) return;
+  const v = qrButtonValue;
+  setBoxBadge(v);
+  setLog('目標箱を「' + v + '」にセットしました。');
+});
+document.getElementById('boxSetBtn').addEventListener('click', function() {
+  const v = document.getElementById('boxInput').value.trim();
+  if (!v) return;
+  setBoxBadge(v);
+  setLog('目標箱を「' + v + '」にセットしました。');
+});
+
+// ---------- QR 自動検出（箱設定）: ブラウザ内蔵 BarcodeDetector ----------
+// 外部ライブラリは使わない。BarcodeDetector が無い端末では自動検出を無効にし、
+// 手入力で箱を設定する（撮影・キュー・登録はそのまま使える）。
+let qrDetector = null;
+let qrFailCount = 0;
+let qrIntervalId = null;
+function initQrDetector() {
+  const note = document.getElementById('qrNote');
+  if (!('BarcodeDetector' in window)) {
+    if (note) {
+      note.style.display = 'block';
+      note.innerText = 'この端末ではQR自動検出が使えません。手入力で箱を設定してください。';
+    }
+    return;
+  }
+  try {
+    qrDetector = new BarcodeDetector({ formats: ['qr_code'] });
+  } catch (e) {
+    qrDetector = null;
+    if (note) {
+      note.style.display = 'block';
+      note.innerText = 'この端末ではQR自動検出が使えません。手入力で箱を設定してください。';
+    }
+    return;
+  }
+  qrIntervalId = setInterval(scanQrFrame, 300);
+}
+async function scanQrFrame() {
+  if (document.hidden || !video.videoWidth || !qrDetector) return;
+  let codes;
+  try {
+    codes = await qrDetector.detect(video);
+  } catch (e) {
+    // 検出失敗はその回だけ無視する。連続で失敗する場合はループを止めて手入力へ案内する。
+    qrFailCount++;
+    if (qrFailCount >= 10) {
+      if (qrIntervalId) { clearInterval(qrIntervalId); qrIntervalId = null; }
+      const note = document.getElementById('qrNote');
+      if (note) {
+        note.style.display = 'block';
+        note.innerText = 'QR自動検出を停止しました。手入力で箱を設定してください。';
+      }
+    }
+    return;
+  }
+  qrFailCount = 0;
+  if (!codes || !codes.length) return;
+  const raw = codes[0] && codes[0].rawValue ? String(codes[0].rawValue) : '';
+  const value = raw.trim();
+  if (!value) return;
+  lastQrValue = value;
+  if (value === currentBox) { hideQrButton(); return; }
+  if (value !== qrButtonValue) showQrButton(value);
+}
+
+// ---------- 撮影キュー（カメラ側） ----------
+// GAS 側の verx_qtyOptions / buildCancelOptions と同一規則。片方を変えたら他方も変えること。
+function cam_parseBoxInfo(str) {
+  const obj = {};
+  if (!str) return obj;
+  str.split(',').forEach(function(part) {
+    const m = part.match(/(.+):(\d+)/);
+    if (m) obj[m[1].trim()] = parseInt(m[2], 10);
+  });
+  return obj;
+}
+function cam_qtyOptions(item, detectedQty) {
+  const remainQty = item.orderCount - item.checkCount;
+  const maxSelect = remainQty > 0 ? remainQty : 1;
+  let autoSelectQty = null;
+  if (detectedQty && detectedQty > 0) {
+    autoSelectQty = detectedQty;
+    if (autoSelectQty > maxSelect) autoSelectQty = maxSelect;
+  }
+  let options = '';
+  const isAllSelected = (autoSelectQty === null) ? ' selected' : '';
+  options += '<option value="' + maxSelect + '"' + isAllSelected + '>全量(' + maxSelect + '個)</option>';
+  for (let i = 1; i <= maxSelect; i++) {
+    const selected = (i === autoSelectQty) ? ' selected' : '';
+    options += '<option value="' + i + '"' + selected + '>' + i + ' 個</option>';
+  }
+  return options;
+}
+function cam_cancelOptions(item) {
+  const cancelableQty = item.checkCount - item.exportedCount;
+  if (cancelableQty <= 0) return '';
+  let options = '<option value="ALL_CANCEL">全体(最大 ' + cancelableQty + '個)</option>';
+  const bObj = cam_parseBoxInfo(item.boxInfo || '');
+  let totalBoxCount = 0;
+  for (let k in bObj) totalBoxCount += bObj[k];
+  let noBoxCount = item.checkCount - totalBoxCount;
+  if (noBoxCount < 0) noBoxCount = 0;
+  const availNoBox = Math.min(noBoxCount, cancelableQty);
+  for (let i = 1; i <= availNoBox; i++) {
+    options += '<option value="-' + i + '|">-' + i + '個 (箱なし分)</option>';
+  }
+  for (let k in bObj) {
+    const availBox = Math.min(bObj[k], cancelableQty);
+    for (let i = 1; i <= availBox; i++) {
+      options += '<option value="-' + i + '|' + k + '">-' + i + '個 (' + k + ')</option>';
+    }
+  }
+  return options;
+}
+
+let camQueueItems = [];
+let camNextId = 1;
+let shotCount = 0;
+
+function camStatusLabel(status) {
+  if (status === 'sending') return '📤 送信中';
+  if (status === 'searching') return '🔍 解析中';
+  if (status === 'registering') return '⏳ 登録中…';
+  if (status === 'done') return '✅ 完了';
+  if (status === 'registered') return '✅ 登録済み';
+  if (status === 'nohit') return '⚠️ 該当なし';
+  if (status === 'failed') return '❌ 失敗';
+  return status;
+}
+function camFind(id) {
+  return camQueueItems.find(function(q) { return q.id === id; });
+}
+function camUpdateCount() {
+  const el = document.getElementById('queueCount');
+  const emptyEl = document.getElementById('queueEmpty');
+  if (el) el.innerText = camQueueItems.length ? ('（' + camQueueItems.length + '件）') : '';
+  if (emptyEl) emptyEl.style.display = camQueueItems.length ? 'none' : 'block';
+}
+function renderCamCard(id) {
+  const item = camFind(id);
+  const area = document.getElementById('queueArea');
+  if (!area) return;
+  let el = document.getElementById('cam-card-' + id);
+  if (!item) { if (el) el.remove(); camUpdateCount(); return; }
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'card';
+    el.id = 'cam-card-' + id;
+    area.appendChild(el);
+  }
+  el.classList.toggle('registered', item.status === 'registered');
+  const statusClass = (item.status === 'done' || item.status === 'registered') ? 'st-done'
+    : ((item.status === 'failed' || item.status === 'nohit') ? 'st-failed' : 'st-searching');
+  const thumbHtml = item.thumb ? '<img class="q-thumb" src="' + item.thumb + '" alt="">' : '<div class="q-thumb"></div>';
+  const headHtml = '<div class="q-head" onclick="camToggle(\'' + item.id + '\')">' + thumbHtml
+    + '<div class="q-text">' + (item.text ? item.text : '(解析中…)') + '</div>'
+    + '<span class="q-status ' + statusClass + '">' + camStatusLabel(item.status) + '</span>'
+    + '<button class="q-del" onclick="event.stopPropagation(); camDelete(\'' + item.id + '\')" title="この撮影を削除">×</button></div>';
+  let summaryHtml = '';
+  if (item.status === 'done' && item.results.length) {
+    const top = item.results[item.selIndex] || item.results[0];
+    summaryHtml = '<div class="q-summary">最上位: <b>' + top.number + '</b> ' + top.name + ' ／ ヒット度 ' + top.score + '点 ／ ' + top.checkCount + ' / ' + top.orderCount + ' 個</div>';
+  } else if (item.status === 'registered') {
+    const top = item.results[item.selIndex] || item.results[0];
+    summaryHtml = '<div class="q-summary">✅ 登録しました: <b>' + top.number + '</b> ' + top.checkCount + ' / ' + top.orderCount + ' 個</div>';
+  } else if (item.status === 'nohit') {
+    summaryHtml = '<div class="q-summary">該当するデータが見つかりませんでした。「' + item.text + '」</div>';
+  } else if (item.status === 'failed') {
+    summaryHtml = '<div class="q-summary">失敗: ' + (item.error || '解析できませんでした。') + '</div>';
+  } else if (item.status === 'registering') {
+    summaryHtml = '<div class="q-summary">登録中…</div>';
+  } else {
+    summaryHtml = '<div class="q-summary">このページで解析中…</div>';
+  }
+  let detailHtml = '';
+  if (item.expanded && (item.status === 'done' || item.status === 'registered') && item.results.length) {
+    const sel = item.results[item.selIndex] || item.results[0];
+    let candOptions = '';
+    item.results.forEach(function(r, i) {
+      candOptions += '<option value="' + i + '"' + (i === item.selIndex ? ' selected' : '') + '>' + (i + 1) + '位 ' + r.number + '（' + r.score + '点）</option>';
+    });
+    const extraHtml = sel.extraModelText ? '<div style="font-weight:bold; font-size:14px; color:#1565c0; margin-bottom:4px;">' + sel.extraModelText + '</div>' : '';
+    const modelHtml = sel.displayModel ? '<div style="font-weight:bold; font-size:15px;">型式寸法: <span style="color:#333;">' + sel.displayModel + '</span></div>' : '';
+    const cancelOptionsStr = cam_cancelOptions(sel);
+    let cancelHtml = '';
+    if (cancelOptionsStr) {
+      cancelHtml = '<div class="q-row"><select id="cam-cancel-qty-' + item.id + '">' + cancelOptionsStr + '</select>'
+        + '<button class="q-btn cancel" onclick="camCancel(\'' + item.id + '\')">取消</button></div>';
+    } else if (sel.checkCount > 0) {
+      cancelHtml = '<div style="color:#c62828; font-size:12px; font-weight:bold; margin-top:5px; text-align:center;">※出力済のため取消不可</div>';
+    }
+    let btnHtml = '';
+    if (sel.isComplete) {
+      btnHtml = '<div style="font-weight:bold; color:#2e7d32; margin-bottom:5px;">✅ チェック完了 (' + sel.checkCount + ' / ' + sel.orderCount + ' 個)</div>' + cancelHtml;
+    } else {
+      btnHtml = '<div style="font-weight:bold; color:#1565c0; margin-bottom:5px;">⏳ 未完了 (' + sel.checkCount + ' / ' + sel.orderCount + ' 個)</div>'
+        + '<div class="q-row"><select id="cam-add-qty-' + item.id + '" style="width:120px; flex:none; background-color:#f1f6fb;">' + cam_qtyOptions(sel, item.detectedQty) + '</select>'
+        + '<button class="q-btn" onclick="camRegister(\'' + item.id + '\')">登録</button></div>' + cancelHtml;
+    }
+    detailHtml = '<div class="q-detail">'
+      + '<div class="q-row"><span style="font-size:13px; font-weight:bold;">候補:</span><select onchange="camSelectCandidate(\'' + item.id + '\', this.value)">' + candOptions + '</select></div>'
+      + '<div class="q-title">' + sel.number + '</div>' + extraHtml + modelHtml
+      + '<div style="font-size:14px; margin-top:4px;">品名: ' + sel.name + '</div>'
+      + btnHtml
+      + (item.regError ? '<div class="q-err">' + item.regError + '</div>' : '')
+      + '</div>';
+  } else if (item.expanded && item.regError) {
+    detailHtml = '<div class="q-err">' + item.regError + '</div>';
+  }
+  el.innerHTML = headHtml + summaryHtml + detailHtml;
+  camUpdateCount();
+}
+function camToggle(id) {
+  const item = camFind(id);
+  if (!item) return;
+  item.expanded = !item.expanded;
+  renderCamCard(id);
+}
+function camSelectCandidate(id, idx) {
+  const item = camFind(id);
+  if (!item) return;
+  item.selIndex = Number(idx) || 0;
+  renderCamCard(id);
+}
+function camDelete(id) {
+  camQueueItems = camQueueItems.filter(function(q) { return q.id !== id; });
+  const el = document.getElementById('cam-card-' + id);
+  if (el) el.remove();
+  camUpdateCount();
+}
+function camRegister(id) {
+  const item = camFind(id);
+  if (!item || !item.results.length || item.status === 'registering') return;
+  const sel = item.results[item.selIndex] || item.results[0];
+  const qtyEl = document.getElementById('cam-add-qty-' + id);
+  const qty = qtyEl ? qtyEl.value : '1';
+  const boxLabel = currentBox ? ('箱: ' + currentBox) : '箱なし';
+  if (!confirm('登録しますか？\n' + sel.number + ' ' + sel.name + '\n' + qty + '個 ／ ' + boxLabel)) return;
+  item.status = 'registering';
+  item.regError = '';
+  renderCamCard(id);
+  camApi('register', { sheetName: sel.sheetName, rowIndex: sel.rowIndex, addQty: qty, box: currentBox, orderKey: sel.orderKey || null }).then(function(data) {
+    sel.checkCount = data.checkCount;
+    sel.orderCount = data.orderCount;
+    sel.exportedCount = data.exportedCount;
+    sel.boxInfo = data.boxInfo;
+    if (data.rowIndex) sel.rowIndex = data.rowIndex;
+    sel.isComplete = sel.checkCount >= sel.orderCount;
+    item.status = 'registered';
+    item.expanded = false;
+    item.regError = '';
+    renderCamCard(id);
+    setLog('登録しました。');
+  }).catch(function(err) {
+    item.status = 'done';
+    item.regError = '登録に失敗しました。通信状況を確認してください。';
+    item.expanded = true;
+    renderCamCard(item.id);
+    setLog('登録に失敗しました。');
+  });
+}
+function camCancel(id) {
+  const item = camFind(id);
+  if (!item || !item.results.length || item.status === 'registering') return;
+  const sel = item.results[item.selIndex] || item.results[0];
+  const qtyEl = document.getElementById('cam-cancel-qty-' + id);
+  const cancelVal = qtyEl ? qtyEl.value : 'ALL_CANCEL';
+  if (!confirm('取り消しますか？\n' + sel.number + ' ' + sel.name + '\n取消: ' + cancelVal)) return;
+  item.status = 'registering';
+  item.regError = '';
+  renderCamCard(id);
+  camApi('cancel', { sheetName: sel.sheetName, rowIndex: sel.rowIndex, cancelVal: String(cancelVal), box: currentBox, orderKey: sel.orderKey || null }).then(function(data) {
+    sel.checkCount = data.checkCount;
+    sel.orderCount = data.orderCount;
+    sel.exportedCount = data.exportedCount;
+    sel.boxInfo = data.boxInfo;
+    if (data.rowIndex) sel.rowIndex = data.rowIndex;
+    sel.isComplete = sel.checkCount >= sel.orderCount;
+    item.status = 'done';
+    item.expanded = false;
+    item.regError = '';
+    renderCamCard(id);
+    setLog('取り消しました。');
+  }).catch(function(err) {
+    item.status = 'done';
+    item.regError = '取り消しに失敗しました。通信状況を確認してください。';
+    item.expanded = true;
+    renderCamCard(item.id);
+    setLog('取り消しに失敗しました。');
+  });
+}
+
+// ---------- カメラ ----------
+let videoTrack = null;
+let torchOn = false;
+let torchSupported = false;
+const video = document.getElementById('cam');
+const logEl = document.getElementById('log');
+const shutterBtn = document.getElementById('shutterBtn');
+
+function setLog(t) { logEl.innerText = t; }
+function showErr(msg) {
+  const box = document.getElementById('errBox');
+  box.style.display = 'block';
+  box.innerText = msg;
+}
+function showWarn(msg) {
+  const box = document.getElementById('warnBox');
+  box.style.display = 'block';
+  box.innerText = msg;
+}
+
+async function startCamera() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showErr('このブラウザはカメラに対応していません。Chrome / Safari の最新版で HTTPS で開いてください。');
+    setLog('カメラを利用できません。');
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
+      audio: false
+    });
+    video.srcObject = stream;
+    videoTrack = stream.getVideoTracks()[0];
+    try {
+      const caps = videoTrack.getCapabilities ? videoTrack.getCapabilities() : {};
+      if (caps.focusMode && caps.focusMode.indexOf('continuous') >= 0) {
+        await videoTrack.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+      }
+      if (caps.torch) {
+        torchSupported = true;
+        document.getElementById('torchBtn').style.display = '';
+      }
+    } catch (e) { /* 対応していない端末では無視 */ }
+    shutterBtn.disabled = false;
+    setLog('カメラ起動中です。枠の中にラベルを入れて「📷 撮影」を押してください。箱のQRを映すと上のボタンから箱を設定できます。');
+    initQrDetector();
+  } catch (err) {
+    const name = err && err.name ? err.name : '';
+    let msg = 'カメラを起動できませんでした。';
+    if (name === 'NotAllowedError' || name === 'SecurityError') msg += 'ブラウザのカメラ許可が必要です。アドレスバーのカメラ権限を「許可」にして開き直してください。';
+    else if (name === 'NotFoundError') msg += 'カメラが見つかりませんでした。';
+    else if (name === 'NotReadableError') msg += 'カメラが他のアプリで使用中です。';
+    else msg += '（' + name + '）HTTPSで開いているか確認してください。';
+    showErr(msg);
+    setLog('カメラを利用できません。');
+  }
+}
+
+function takeShot() {
+  if (!video.videoWidth) { setLog('カメラの準備中です。少し待って撮影してください。'); return; }
+  flashCam();
+  const canvas = document.createElement('canvas');
+  const maxDim = 2000;
+  const scale = Math.min(1, maxDim / Math.max(video.videoWidth, video.videoHeight));
+  canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+  canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+  canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+  const thumbScale = Math.min(1, 320 / Math.max(canvas.width, canvas.height));
+  const thumbCanvas = document.createElement('canvas');
+  thumbCanvas.width = Math.max(1, Math.round(canvas.width * thumbScale));
+  thumbCanvas.height = Math.max(1, Math.round(canvas.height * thumbScale));
+  thumbCanvas.getContext('2d').drawImage(canvas, 0, 0, thumbCanvas.width, thumbCanvas.height);
+  const thumbUrl = thumbCanvas.toDataURL('image/jpeg', 0.8);
+
+  const id = 'c' + (camNextId++);
+  const item = {
+    id: id, thumb: thumbUrl, text: '', source: 'camera', image: dataUrl,
+    status: 'searching', error: '', results: [], selIndex: 0, expanded: false,
+    detectedQty: null, regError: '', watchdog: null
+  };
+  camQueueItems.push(item);
+  renderCamCard(id);
+  shotCount++;
+  document.getElementById('shotCount').innerText = '撮影: ' + shotCount + '件';
+  setLog('撮影しました。このページで解析中…（次の撮影もできます）');
+  cam_armWatchdog(item, 75000);
+  cam_processShot(item);
+}
+function flashCam() {
+  const f = document.getElementById('flash');
+  if (!f) return;
+  f.style.opacity = '1';
+  setTimeout(function() { f.style.opacity = '0'; }, 120);
+}
+// 枠内タップで撮影（400msデバウンス。枠内にボタンは無いが、ボタンが増えた場合は撮影にしない）。
+let lastShotAt = 0;
+document.getElementById('camWrap').addEventListener('click', function(e) {
+  if (e.target && e.target.closest && e.target.closest('button')) return;
+  const now = Date.now();
+  if (now - lastShotAt < 400) return;
+  lastShotAt = now;
+  takeShot();
+});
+
+document.getElementById('shutterBtn').addEventListener('click', takeShot);
+document.getElementById('torchBtn').addEventListener('click', async function() {
+  if (!videoTrack || !torchSupported) return;
+  try {
+    torchOn = !torchOn;
+    await videoTrack.applyConstraints({ advanced: [{ torch: torchOn }] });
+    this.innerText = torchOn ? '🔦 トーチ OFF' : '🔦 トーチ ON';
+  } catch (e) { /* 対応していない端末では無視 */ }
+});
+document.getElementById('closeBtn').addEventListener('click', function() {
+  if (videoTrack) videoTrack.stop();
+  if (video.srcObject) { video.srcObject.getTracks().forEach(function(t) { t.stop(); }); video.srcObject = null; }
+  setLog('カメラを終了しました。このタブを閉じて仕分けアプリに戻ってください。');
+  try { window.close(); } catch (e) {}
+});
+
+startCamera();
+</script>
+</body>
+</html>
