@@ -73,7 +73,7 @@
   <div id="boxBadge">📦 現在の箱: 未設定（箱なし）</div>
   <div id="sheetRow" style="display:flex; gap:8px; margin-top:8px; align-items:center;">
     <label for="sheetInput" style="font-size:14px; font-weight:bold; white-space:nowrap;">製番:</label>
-    <input id="sheetInput" type="text" value="A200001UR" autocomplete="off" style="flex:1; font-size:15px; padding:10px; border-radius:8px; border:none;">
+    <input id="sheetInput" type="text" value="A260016MK" autocomplete="off" style="flex:1; font-size:15px; padding:10px; border-radius:8px; border:none;">
   </div>
   <button id="qrBtn"></button>
   <div id="boxManual">
@@ -138,8 +138,8 @@ async function camApi(action, body) {
 // ---------- 製番（対象シート）の選択 ----------
 // 5.0.1 のシートには実データ（A260016MK）が入っているため、検索は必ず
 // ここで選んだ製番タブに対して行う。空のまま検索は送らない。
-// 初期値は A200001UR（テスト製番）。変更は localStorage に保存する。
-const SHEET_KEY = 'st13fix_targetSheet';
+// 初期値は A260016MK（受け入れ作業中の製番）。変更は localStorage に保存する。
+const SHEET_KEY = 'st13fix_targetSheet_v2';
 function getTargetSheet() {
   const el = document.getElementById('sheetInput');
   return el ? el.value.trim() : '';
