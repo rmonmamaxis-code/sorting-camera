@@ -41,6 +41,8 @@
   .q-head { display: flex; gap: 10px; align-items: center; cursor: pointer; }
   .q-thumb { width: 72px; height: 72px; object-fit: cover; border-radius: 6px; border: 1px solid #cfd8dc; background: #eceff1; flex: none; }
   .q-text { font-size: 14px; font-weight: bold; word-break: break-all; flex: 1; }
+  .q-ocr-toggle { background: none; border: none; color: #1565c0; font-size: 12px; font-weight: bold; padding: 4px 0 0 0; cursor: pointer; text-align: left; }
+  .q-ocr-full { font-size: 13px; word-break: break-all; background: #f5f5f5; border-radius: 6px; padding: 8px; margin-top: 6px; white-space: pre-wrap; }
   .q-status { font-size: 12px; font-weight: bold; padding: 3px 8px; border-radius: 10px; background: #eceff1; color: #455a64; white-space: nowrap; }
   .q-status.st-searching { background: #e3f2fd; color: #1565c0; }
   .q-status.st-done { background: #e8f5e9; color: #2e7d32; }
@@ -507,17 +509,20 @@ function cam_parseBoxInfo(str) {
 function cam_qtyOptions(item, detectedQty) {
   const remainQty = item.orderCount - item.checkCount;
   const maxSelect = remainQty > 0 ? remainQty : 1;
-  let autoSelectQty = null;
+  // 数量は常に全量を先頭・デフォルト選択にする。読み取り数量はその下に
+  // 「N個（読取結果）」として置く（全量と同数のときは重複させない）。
+  let readQty = null;
   if (detectedQty && detectedQty > 0) {
-    autoSelectQty = detectedQty;
-    if (autoSelectQty > maxSelect) autoSelectQty = maxSelect;
+    readQty = Math.min(detectedQty, maxSelect);
   }
   let options = '';
-  const isAllSelected = (autoSelectQty === null) ? ' selected' : '';
-  options += '<option value="' + maxSelect + '"' + isAllSelected + '>全量(' + maxSelect + '個)</option>';
+  options += '<option value="' + maxSelect + '" selected>全量(' + maxSelect + '個)</option>';
+  if (readQty !== null && readQty !== maxSelect) {
+    options += '<option value="' + readQty + '">' + readQty + ' 個（読取結果）</option>';
+  }
   for (let i = 1; i <= maxSelect; i++) {
-    const selected = (i === autoSelectQty) ? ' selected' : '';
-    options += '<option value="' + i + '"' + selected + '>' + i + ' 個</option>';
+    if (i === readQty) continue; // 「読取結果」の行と重複させない
+    options += '<option value="' + i + '">' + i + ' 個</option>';
   }
   return options;
 }
@@ -566,6 +571,54 @@ function camUpdateCount() {
   if (el) el.innerText = camQueueItems.length ? ('（' + camQueueItems.length + '件）') : '';
   if (emptyEl) emptyEl.style.display = camQueueItems.length ? 'none' : 'block';
 }
+function camSummaryHtml(item) {
+  const ocrText = item.text ? item.text : '';
+  const ocrPreview = ocrText.length > 24 ? ocrText.slice(0, 24) + '…' : ocrText;
+  let inner = '';
+  if (item.status === 'done' && item.results.length) {
+    const top = item.results[item.selIndex] || item.results[0];
+    inner = '最上位: <b>' + top.number + '</b> ' + top.name + ' ／ ヒット度 ' + top.score + '点 ／ ' + top.checkCount + ' / ' + top.orderCount + ' 個';
+  } else if (item.status === 'registered') {
+    const top = item.results[item.selIndex] || item.results[0];
+    inner = '✅ 登録しました: <b>' + top.number + '</b> ' + top.checkCount + ' / ' + top.orderCount + ' 個';
+  } else if (item.status === 'nohit') {
+    inner = '該当するデータが見つかりませんでした。「' + ocrPreview + '」';
+  } else if (item.status === 'failed') {
+    inner = '失敗: ' + (item.error || '解析できませんでした。');
+  } else if (item.status === 'registering') {
+    inner = '登録中…';
+  } else {
+    inner = 'このページで解析中…';
+  }
+  return '<div class="q-summary" id="cam-summary-' + item.id + '">' + inner + '</div>';
+}
+
+function camDetailBodyHtml(item) {
+  const sel = item.results[item.selIndex] || item.results[0];
+  const extraHtml = sel.extraModelText ? '<div style="font-weight:bold; font-size:14px; color:#1565c0; margin-bottom:4px;">' + sel.extraModelText + '</div>' : '';
+  const modelHtml = sel.displayModel ? '<div style="font-weight:bold; font-size:15px;">型式寸法: <span style="color:#333;">' + sel.displayModel + '</span></div>' : '';
+  const cancelOptionsStr = cam_cancelOptions(sel);
+  let cancelHtml = '';
+  if (cancelOptionsStr) {
+    cancelHtml = '<div class="q-row"><select id="cam-cancel-qty-' + item.id + '">' + cancelOptionsStr + '</select>'
+      + '<button class="q-btn cancel" onclick="camCancel(\'' + item.id + '\')">取消</button></div>';
+  } else if (sel.checkCount > 0) {
+    cancelHtml = '<div style="color:#c62828; font-size:12px; font-weight:bold; margin-top:5px; text-align:center;">※出力済のため取消不可</div>';
+  }
+  let btnHtml = '';
+  if (sel.isComplete) {
+    btnHtml = '<div style="font-weight:bold; color:#2e7d32; margin-bottom:5px;">✅ チェック完了 (' + sel.checkCount + ' / ' + sel.orderCount + ' 個)</div>' + cancelHtml;
+  } else {
+    btnHtml = '<div style="font-weight:bold; color:#1565c0; margin-bottom:5px;">⏳ 未完了 (' + sel.checkCount + ' / ' + sel.orderCount + ' 個)</div>'
+      + '<div class="q-row"><select id="cam-add-qty-' + item.id + '" style="width:120px; flex:none; background-color:#f1f6fb;">' + cam_qtyOptions(sel, item.detectedQty) + '</select>'
+      + '<button class="q-btn" onclick="camRegister(\'' + item.id + '\')">登録</button></div>' + cancelHtml;
+  }
+  return '<div class="q-title">' + sel.number + '</div>' + extraHtml + modelHtml
+    + '<div style="font-size:14px; margin-top:4px;">品名: ' + sel.name + '</div>'
+    + btnHtml
+    + (item.regError ? '<div class="q-err">' + item.regError + '</div>' : '');
+}
+
 function renderCamCard(id) {
   const item = camFind(id);
   const area = document.getElementById('queueArea');
@@ -581,27 +634,14 @@ function renderCamCard(id) {
   el.classList.toggle('registered', item.status === 'registered');
   const statusClass = (item.status === 'done' || item.status === 'registered') ? 'st-done'
     : ((item.status === 'failed' || item.status === 'nohit') ? 'st-failed' : 'st-searching');
+  const ocrText = item.text ? item.text : '(解析中…)';
+  const ocrPreview = ocrText.length > 24 ? ocrText.slice(0, 24) + '…' : ocrText;
   const thumbHtml = item.thumb ? '<img class="q-thumb" src="' + item.thumb + '" alt="">' : '<div class="q-thumb"></div>';
   const headHtml = '<div class="q-head" onclick="camToggle(\'' + item.id + '\')">' + thumbHtml
-    + '<div class="q-text">' + (item.text ? item.text : '(解析中…)') + '</div>'
+    + '<div class="q-text">' + ocrPreview + '</div>'
     + '<span class="q-status ' + statusClass + '">' + camStatusLabel(item.status) + '</span>'
     + '<button class="q-del" onclick="event.stopPropagation(); camDelete(\'' + item.id + '\')" title="この撮影を削除">×</button></div>';
-  let summaryHtml = '';
-  if (item.status === 'done' && item.results.length) {
-    const top = item.results[item.selIndex] || item.results[0];
-    summaryHtml = '<div class="q-summary">最上位: <b>' + top.number + '</b> ' + top.name + ' ／ ヒット度 ' + top.score + '点 ／ ' + top.checkCount + ' / ' + top.orderCount + ' 個</div>';
-  } else if (item.status === 'registered') {
-    const top = item.results[item.selIndex] || item.results[0];
-    summaryHtml = '<div class="q-summary">✅ 登録しました: <b>' + top.number + '</b> ' + top.checkCount + ' / ' + top.orderCount + ' 個</div>';
-  } else if (item.status === 'nohit') {
-    summaryHtml = '<div class="q-summary">該当するデータが見つかりませんでした。「' + item.text + '」</div>';
-  } else if (item.status === 'failed') {
-    summaryHtml = '<div class="q-summary">失敗: ' + (item.error || '解析できませんでした。') + '</div>';
-  } else if (item.status === 'registering') {
-    summaryHtml = '<div class="q-summary">登録中…</div>';
-  } else {
-    summaryHtml = '<div class="q-summary">このページで解析中…</div>';
-  }
+  let summaryHtml = camSummaryHtml(item);
   let detailHtml = '';
   if (item.expanded && (item.status === 'done' || item.status === 'registered') && item.results.length) {
     const sel = item.results[item.selIndex] || item.results[0];
@@ -609,35 +649,21 @@ function renderCamCard(id) {
     item.results.forEach(function(r, i) {
       candOptions += '<option value="' + i + '"' + (i === item.selIndex ? ' selected' : '') + '>' + (i + 1) + '位 ' + r.number + '（' + r.score + '点）</option>';
     });
-    const extraHtml = sel.extraModelText ? '<div style="font-weight:bold; font-size:14px; color:#1565c0; margin-bottom:4px;">' + sel.extraModelText + '</div>' : '';
-    const modelHtml = sel.displayModel ? '<div style="font-weight:bold; font-size:15px;">型式寸法: <span style="color:#333;">' + sel.displayModel + '</span></div>' : '';
-    const cancelOptionsStr = cam_cancelOptions(sel);
-    let cancelHtml = '';
-    if (cancelOptionsStr) {
-      cancelHtml = '<div class="q-row"><select id="cam-cancel-qty-' + item.id + '">' + cancelOptionsStr + '</select>'
-        + '<button class="q-btn cancel" onclick="camCancel(\'' + item.id + '\')">取消</button></div>';
-    } else if (sel.checkCount > 0) {
-      cancelHtml = '<div style="color:#c62828; font-size:12px; font-weight:bold; margin-top:5px; text-align:center;">※出力済のため取消不可</div>';
-    }
-    let btnHtml = '';
-    if (sel.isComplete) {
-      btnHtml = '<div style="font-weight:bold; color:#2e7d32; margin-bottom:5px;">✅ チェック完了 (' + sel.checkCount + ' / ' + sel.orderCount + ' 個)</div>' + cancelHtml;
-    } else {
-      btnHtml = '<div style="font-weight:bold; color:#1565c0; margin-bottom:5px;">⏳ 未完了 (' + sel.checkCount + ' / ' + sel.orderCount + ' 個)</div>'
-        + '<div class="q-row"><select id="cam-add-qty-' + item.id + '" style="width:120px; flex:none; background-color:#f1f6fb;">' + cam_qtyOptions(sel, item.detectedQty) + '</select>'
-        + '<button class="q-btn" onclick="camRegister(\'' + item.id + '\')">登録</button></div>' + cancelHtml;
-    }
     detailHtml = '<div class="q-detail">'
       + '<div class="q-row"><span style="font-size:13px; font-weight:bold;">候補:</span><select onchange="camSelectCandidate(\'' + item.id + '\', this.value)">' + candOptions + '</select></div>'
-      + '<div class="q-title">' + sel.number + '</div>' + extraHtml + modelHtml
-      + '<div style="font-size:14px; margin-top:4px;">品名: ' + sel.name + '</div>'
-      + btnHtml
-      + (item.regError ? '<div class="q-err">' + item.regError + '</div>' : '')
+      + '<div id="cam-detail-body-' + item.id + '">' + camDetailBodyHtml(item) + '</div>'
       + '</div>';
+
   } else if (item.expanded && item.regError) {
     detailHtml = '<div class="q-err">' + item.regError + '</div>';
   }
-  el.innerHTML = headHtml + summaryHtml + detailHtml;
+  let ocrHtml = '';
+  if (item.text) {
+    ocrHtml = '<button class="q-ocr-toggle" onclick="event.stopPropagation(); camToggleOcrText(\'' + item.id + '\')">'
+      + (item.showOcrText ? '▲ 読み取り文字を閉じる' : '▼ 読み取り文字を見る') + '</button>'
+      + (item.showOcrText ? '<div class="q-ocr-full">読み取り文字：' + item.text + '</div>' : '');
+  }
+  el.innerHTML = headHtml + ocrHtml + summaryHtml + detailHtml;
   camUpdateCount();
 }
 function camToggle(id) {
@@ -646,10 +672,29 @@ function camToggle(id) {
   item.expanded = !item.expanded;
   renderCamCard(id);
 }
+function camToggleOcrText(id) {
+  const item = camFind(id);
+  if (!item) return;
+  item.showOcrText = !item.showOcrText;
+  const y = window.scrollY;
+  renderCamCard(id);
+  window.scrollTo(0, y);
+}
 function camSelectCandidate(id, idx) {
   const item = camFind(id);
   if (!item) return;
   item.selIndex = Number(idx) || 0;
+  // 候補の切り替えではカード全体を作り直さない。候補プルダウン自体はそのままにし、
+  // 要約と詳細本体だけを差し替える。全体を作り直すと iPhone でプルダウンを閉じた
+  // 拍子にスクロール位置が飛び、展開が閉じたように見えるため。
+  const summaryEl = document.getElementById('cam-summary-' + id);
+  const bodyEl = document.getElementById('cam-detail-body-' + id);
+  const cardEl = document.getElementById('cam-card-' + id);
+  if (summaryEl && bodyEl && cardEl) {
+    summaryEl.outerHTML = camSummaryHtml(item);
+    bodyEl.innerHTML = camDetailBodyHtml(item);
+    return;
+  }
   renderCamCard(id);
 }
 function camDelete(id) {
@@ -879,7 +924,7 @@ function takeShot() {
   const id = 'c' + (camNextId++);
   const item = {
     id: id, thumb: thumbUrl, text: '', source: 'camera', image: dataUrl,
-    status: 'searching', error: '', results: [], selIndex: 0, expanded: false,
+    status: 'searching', error: '', results: [], selIndex: 0, expanded: false, showOcrText: false,
     detectedQty: null, regError: '', pendingOp: null, directFailed: false, watchdog: null
   };
   camQueueItems.push(item);
