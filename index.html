@@ -3,7 +3,7 @@
      OCR（Stage 11 の2パス）はこのページ内で行い、検索・登録・取消は GAS の exec URL へ
      直接 fetch POST する（doPost）。GAS タブがバックグラウンド／閉じていても進む。
      直接つながらない場合のみ、元のアプリ（GAS タブ）への postMessage 経由へフォールバックする。
-     QR 検出はブラウザ内蔵の BarcodeDetector を使う。外部のスクリプト・画像・フォントは読み込まない。
+     QR 検出はブラウザ内蔵の BarcodeDetector を優先し、無い端末では同梱の jsQR 1.4.0（js/jsQR.min.js）を使う。CDN など外部のスクリプト・画像・フォントは読み込まない。
      Vision APIキーは verx-index.html と同一（最終段階の移行までは現状維持）。 -->
 <html lang="ja">
 <head>
@@ -386,35 +386,69 @@ document.getElementById('boxSetBtn').addEventListener('click', function() {
   postToGas({ type: 'set-box', box: v });
 });
 
-// ---------- QR 自動検出（箱設定）: ブラウザ内蔵 BarcodeDetector ----------
-// 外部ライブラリは使わない。BarcodeDetector が無い端末では自動検出を無効にし、
-// 手入力で箱を設定する（撮影・キュー・登録はそのまま使える）。
+// ---------- QR 自動検出（箱設定）: BarcodeDetector 優先、無ければ jsQR ----------
+// BarcodeDetector がある端末（Android Chrome など）は従来通りそれを使う。
+// 無い端末（iPhone / iPad は Safari も Chrome も WebKit のため BarcodeDetector が無い）
+// だけ、リポジトリに同梱した jsQR 1.4.0（js/jsQR.min.js）を遅延読み込みして使う。
+// CDN 読み込みはしない。jsQR は端末内で画像を解析するだけで、外部送信は無い。
+// jsQR は 500ms 間隔・最大 640px に縮小して解析し、CPU 負荷を抑える。
 let qrDetector = null;
+let qrMode = ''; // 'native' | 'jsqr'
 let qrFailCount = 0;
 let qrIntervalId = null;
-function initQrDetector() {
+let qrCanvas = null;
+let qrScanning = false;
+const QR_JSQR_SRC = 'js/jsQR.min.js';
+function qrShowManualNote(text) {
   const note = document.getElementById('qrNote');
-  if (!('BarcodeDetector' in window)) {
-    if (note) {
-      note.style.display = 'block';
-      note.innerText = 'この端末ではQR自動検出が使えません。手入力で箱を設定してください。';
+  if (note) {
+    note.style.display = 'block';
+    note.innerText = text;
+  }
+}
+function qrHandleValue(raw) {
+  const value = String(raw || '').trim();
+  if (!value) return;
+  lastQrValue = value;
+  if (value === currentBox) { hideQrButton(); return; }
+  if (value !== qrButtonValue) showQrButton(value);
+}
+function initQrDetector() {
+  if ('BarcodeDetector' in window) {
+    try {
+      qrDetector = new BarcodeDetector({ formats: ['qr_code'] });
+      qrMode = 'native';
+      qrIntervalId = setInterval(scanQrFrame, 300);
+      return;
+    } catch (e) {
+      qrDetector = null;
     }
+  }
+  // フォールバック: jsQR（同梱ファイル）。既に読み込み済みならすぐ開始する。
+  if (typeof jsQR === 'function') {
+    qrMode = 'jsQR';
+    qrIntervalId = setInterval(scanQrFrame, 500);
     return;
   }
-  try {
-    qrDetector = new BarcodeDetector({ formats: ['qr_code'] });
-  } catch (e) {
-    qrDetector = null;
-    if (note) {
-      note.style.display = 'block';
-      note.innerText = 'この端末ではQR自動検出が使えません。手入力で箱を設定してください。';
+  const s = document.createElement('script');
+  s.src = QR_JSQR_SRC;
+  s.onload = function() {
+    if (typeof jsQR === 'function') {
+      qrMode = 'jsQR';
+      qrIntervalId = setInterval(scanQrFrame, 500);
+    } else {
+      qrShowManualNote('この端末ではQR自動検出が使えません。手入力で箱を設定してください。');
     }
-    return;
-  }
-  qrIntervalId = setInterval(scanQrFrame, 300);
+  };
+  s.onerror = function() {
+    qrShowManualNote('この端末ではQR自動検出が使えません。手入力で箱を設定してください。');
+  };
+  document.head.appendChild(s);
 }
 async function scanQrFrame() {
-  if (document.hidden || !video.videoWidth || !qrDetector) return;
+  if (document.hidden || !video.videoWidth) return;
+  if (qrMode === 'jsQR') { scanQrFrameJsQR(); return; }
+  if (!qrDetector) return;
   let codes;
   try {
     codes = await qrDetector.detect(video);
@@ -423,22 +457,40 @@ async function scanQrFrame() {
     qrFailCount++;
     if (qrFailCount >= 10) {
       if (qrIntervalId) { clearInterval(qrIntervalId); qrIntervalId = null; }
-      const note = document.getElementById('qrNote');
-      if (note) {
-        note.style.display = 'block';
-        note.innerText = 'QR自動検出を停止しました。手入力で箱を設定してください。';
-      }
+      qrShowManualNote('QR自動検出を停止しました。手入力で箱を設定してください。');
     }
     return;
   }
   qrFailCount = 0;
   if (!codes || !codes.length) return;
   const raw = codes[0] && codes[0].rawValue ? String(codes[0].rawValue) : '';
-  const value = raw.trim();
-  if (!value) return;
-  lastQrValue = value;
-  if (value === currentBox) { hideQrButton(); return; }
-  if (value !== qrButtonValue) showQrButton(value);
+  qrHandleValue(raw);
+}
+function scanQrFrameJsQR() {
+  if (qrScanning || typeof jsQR !== 'function') return;
+  if (!video.videoWidth || !video.videoHeight) return;
+  qrScanning = true;
+  try {
+    if (!qrCanvas) qrCanvas = document.createElement('canvas');
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    const scale = Math.min(1, 640 / Math.max(vw, vh));
+    const w = Math.max(1, Math.round(vw * scale));
+    const h = Math.max(1, Math.round(vh * scale));
+    if (qrCanvas.width !== w) qrCanvas.width = w;
+    if (qrCanvas.height !== h) qrCanvas.height = h;
+    const ctx = qrCanvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, w, h);
+    const img = ctx.getImageData(0, 0, w, h);
+    // 箱の QR は通常の黒 on 白のため dontInvert で十分。反転 QR は対象外。
+    const res = jsQR(img.data, w, h, { inversionAttempts: 'dontInvert' });
+    if (res && res.data) qrHandleValue(res.data);
+  } catch (e) {
+    // jsQR の 1 回分の失敗は無視する（次フレームで再試行）。連続失敗で止めない。
+  } finally {
+    qrScanning = false;
+  }
 }
 
 // ---------- 撮影キュー（カメラ側） ----------
