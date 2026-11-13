@@ -811,10 +811,31 @@ function camRegister(id) {
   const qty = qtyEl ? qtyEl.value : '1';
   const boxLabel = currentBox ? ('箱: ' + currentBox) : '箱なし';
   if (!confirm('登録しますか？\n' + cam_dispNo(sel) + ' ' + sel.name + '\n' + qty + '個 ／ ' + boxLabel)) return;
+  camDoRegister(id, sel, qty, false);
+}
+// ★ 第20段階: 登録の実処理。サーバーが箱のZ番号の確認（zConfirm）を返したら
+// ポップアップで確認し、OKなら forceZ=true で再送する。キャンセルなら登録しない。
+function camDoRegister(id, sel, qty, forceZ) {
+  const item = camFind(id);
+  if (!item) return;
   item.status = 'registering';
   item.regError = '';
   renderCamCard(id);
-  camApi('register', { sheetName: sel.sheetName, rowIndex: sel.rowIndex, addQty: qty, box: currentBox, orderKey: sel.orderKey || null }).then(function(data) {
+  camApi('register', { sheetName: sel.sheetName, rowIndex: sel.rowIndex, addQty: qty, box: currentBox, orderKey: sel.orderKey || null, forceZ: forceZ }).then(function(data) {
+    if (data && data.zConfirm) {
+      const zc = data.zConfirm;
+      item.status = 'done';
+      item.expanded = true;
+      renderCamCard(id);
+      if (confirm('この箱には ' + zc.boxZNos.join('、') + ' の物が入っています。\n' + zc.itemZNo + ' の物を同じ箱に登録しますか？')) {
+        camDoRegister(id, sel, qty, true);
+      } else {
+        item.regError = '登録をやめました（箱のZ番号が違います）。';
+        renderCamCard(id);
+        setLog('登録をやめました。');
+      }
+      return;
+    }
     sel.checkCount = data.checkCount;
     sel.orderCount = data.orderCount;
     sel.exportedCount = data.exportedCount;
