@@ -1,10 +1,21 @@
 <!DOCTYPE html>
 <!-- 仕分けツール ver.X 連続撮影カメラページ（単体HTML・静的ホスティング用）。
-     OCR（Stage 11 の2パス）はこのページ内で行い、検索・登録・取消は GAS の exec URL へ
+     GitHub Pages（sorting-camera のルート）に置く。GAS のサンドボックス iframe 内では
+     getUserMedia が使えないため、カメラはこのページ（トップレベル）で動かす。
+     OCR（Stage 11 の2パス）はこのページ内で行い、検索・登録・取消は ver.X の exec URL へ
      直接 fetch POST する（doPost）。GAS タブがバックグラウンド／閉じていても進む。
      直接つながらない場合のみ、元のアプリ（GAS タブ）への postMessage 経由へフォールバックする。
+     2026-11-17 最新化（5.0.1 側 Stage 19/20 相当を反映）:
+       - 製番（対象シート）プルダウンを追加。サーバーからシート名を取り、手入力で絞り込みできる。
+         既定は A200001UR（保存済みの製番が無くなっていたら A200001UR、無ければ先頭のシート）。
+         検索は必ずここで選んだ製番に対して送る（空のまま送らない）。
+       - 表示する番号はユニットNoのみ（cam_dispNo）。照合が「対象外」の行はグレーアウト＋バッジ表示。
+       - 箱のZ番号チェック: 登録時にサーバーが確認（zConfirm）を返したらポップアップで確認し、
+         OKなら forceZ=true で再送、キャンセルなら登録しない。
      QR 検出はブラウザ内蔵の BarcodeDetector を優先し、無い端末では同梱の jsQR 1.4.0（js/jsQR.min.js）を使う。CDN など外部のスクリプト・画像・フォントは読み込まない。
-     Vision APIキーは verx-index.html と同一（最終段階の移行までは現状維持）。 -->
+     Vision APIキーは verx-index.html と同一（最終段階の移行までは現状維持）。
+     既知の制限: このページからの直接登録ではタイムログの記録と Z番号完了の検出は行わない。
+     監査ログはサーバー側で書かれる。 -->
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
@@ -57,6 +68,14 @@
   .q-btn.cancel { flex: 1; background: #c62828; }
   .q-btn:disabled { background: #90a4ae; }
   .q-err { color: #c62828; font-size: 13px; font-weight: bold; margin-top: 6px; }
+  /* ★ 第19段階: 製番プルダウン（入力で絞り込み） */
+  .cam-combo-wrap { position: relative; display: flex; flex: 1; min-width: 0; }
+  .cam-combo-btn { background: #546e7a; color: #fff; border: none; border-radius: 0 8px 8px 0; padding: 0 14px; font-size: 15px; cursor: pointer; flex: none; }
+  .cam-combo-list { display: none; position: absolute; top: 100%; left: 0; right: 0; background: #fff; color: #263238; border: 1px solid #b0bec5; border-radius: 6px; margin-top: 4px; max-height: 230px; overflow-y: auto; text-align: left; box-shadow: 0 4px 12px rgba(0,0,0,0.3); z-index: 20; }
+  .cam-combo-list.show { display: block; }
+  .cam-combo-item { padding: 10px 12px; font-size: 15px; cursor: pointer; border-bottom: 1px solid #eceff1; }
+  .cam-combo-item:last-child { border-bottom: none; }
+  .cam-combo-empty { padding: 10px 12px; font-size: 14px; color: #78909c; }
 </style>
 </head>
 <body>
@@ -66,6 +85,14 @@
 
 <div id="topBar">
   <div id="boxBadge">📦 現在の箱: 未設定（箱なし）</div>
+  <div id="sheetRow" style="display:flex; gap:8px; margin-top:8px; align-items:center;">
+    <label for="sheetInput" style="font-size:14px; font-weight:bold; white-space:nowrap;">製番:</label>
+    <div class="cam-combo-wrap">
+      <input id="sheetInput" type="text" value="" autocomplete="off" oninput="camSheetInput()" style="flex:1; min-width:0; font-size:15px; padding:10px; border-radius:8px 0 0 8px; border:none;">
+      <button type="button" class="cam-combo-btn" onclick="camToggleSheetList(event)">▼</button>
+      <div id="sheetInput_list" class="cam-combo-list"></div>
+    </div>
+  </div>
   <button id="qrBtn"></button>
   <div id="boxManual">
     <input id="boxInput" type="text" placeholder="箱を手入力（QRが読めないとき）">
@@ -93,7 +120,7 @@
   <div id="queueEmpty" style="font-size:12px; color:#b0bec5;">まだ撮影がありません。シャッターを押すと、ここに結果が積み重なります。</div>
 </div>
 
-<div class="hint">このページは撮影専用です。検索・登録はこのページが仕分けアプリに直接問い合わせて行います（元のアプリを閉じていても動きます）。直接つながらない場合のみ元のアプリ経由で処理します。元のアプリは CSV・リスト管理用です。映像の枠内をタップしても撮影できます。カメラは「終了」で解放してください。</div>
+<div class="hint">このページは撮影専用です。検索・登録はこのページが仕分けアプリに直接問い合わせて行います（元のアプリを閉じていても動きます）。製番は上の欄で選んだシートに固定されます。直接つながらない場合のみ元のアプリ経由で処理します（その場合はアプリ側の製番設定で検索します）。元のアプリは CSV・リスト管理用です。映像の枠内をタップしても撮影できます。カメラは「終了」で解放してください。</div>
 <script>
 // ---------- 親（GAS アプリ）との往復 ----------
 // opener は GAS のサンドボックス iframe（*.googleusercontent.com）なので、
@@ -147,6 +174,100 @@ async function camApi(action, body) {
     return data;
   } finally { clearTimeout(timer); }
 }
+// ---------- 製番（対象シート）の選択 ----------
+// サーバーから今あるシート名を取ってプルダウンに出す。手入力すると
+// 入力文字を含むシートだけに絞り込む（部分一致・大文字小文字を区別しない）。
+// 検索は必ずここで選んだ製番タブに対して行う。空のまま検索は送らない。
+// 保存済みの製番がもう存在しない場合（タブ削除など）は A200001UR、
+// 無ければ先頭のシートを既定にする。変更は localStorage に保存する。
+// 通信に失敗したら手入力のまま（保存済みの値か空欄）使う。
+const SHEET_KEY = 'verx_targetSheet_v1';
+const SHEET_DEFAULT = 'A200001UR';
+let camSheetCandidates = [];
+function camSheetMatches(name, q) {
+  if (!q) return true;
+  return String(name).toLowerCase().indexOf(String(q).toLowerCase()) !== -1;
+}
+function camRenderSheetList() {
+  const input = document.getElementById('sheetInput');
+  const list = document.getElementById('sheetInput_list');
+  if (!input || !list) return;
+  const q = input.value.trim();
+  const cands = camSheetCandidates.filter(function(name) { return camSheetMatches(name, q); });
+  list.innerHTML = '';
+  if (cands.length === 0) {
+    const div = document.createElement('div');
+    div.className = 'cam-combo-empty';
+    div.textContent = q ? '「' + q + '」に一致する製番がありません' : '製番がありません';
+    list.appendChild(div);
+    return;
+  }
+  cands.forEach(function(name) {
+    const div = document.createElement('div');
+    div.className = 'cam-combo-item';
+    div.textContent = name;
+    div.onclick = function() { camSelectSheet(name); };
+    list.appendChild(div);
+  });
+}
+function camHideSheetList() {
+  const list = document.getElementById('sheetInput_list');
+  if (list) list.classList.remove('show');
+}
+function camToggleSheetList(event) {
+  if (event) event.stopPropagation();
+  const list = document.getElementById('sheetInput_list');
+  if (!list) return;
+  const willShow = !list.classList.contains('show');
+  camHideSheetList();
+  if (willShow) { camRenderSheetList(); list.classList.add('show'); }
+}
+function camSelectSheet(name) {
+  const input = document.getElementById('sheetInput');
+  if (!input) return;
+  input.value = name;
+  camHideSheetList();
+  input.blur();
+  try { localStorage.setItem(SHEET_KEY, name); } catch (e) {}
+}
+function camSheetInput() {
+  const list = document.getElementById('sheetInput_list');
+  if (list && list.classList.contains('show')) camRenderSheetList();
+}
+function camSaveSheetInput() {
+  const input = document.getElementById('sheetInput');
+  if (!input) return;
+  try { localStorage.setItem(SHEET_KEY, input.value.trim()); } catch (e) {}
+}
+function getTargetSheet() {
+  const el = document.getElementById('sheetInput');
+  return el ? el.value.trim() : '';
+}
+(function initSheetInput() {
+  const el = document.getElementById('sheetInput');
+  if (!el) return;
+  el.addEventListener('change', camSaveSheetInput);
+  document.addEventListener('click', function(event) {
+    if (!event.target.closest('.cam-combo-wrap')) camHideSheetList();
+  });
+  let saved = '';
+  try { saved = localStorage.getItem(SHEET_KEY) || ''; } catch (e) {}
+  if (saved) el.value = saved;
+  camApi('sheets', {}).then(function(data) {
+    const names = (data && data.sheets) || [];
+    if (!names.length) return;
+    camSheetCandidates = names.slice();
+    const cur = el.value.trim();
+    if (!cur || names.indexOf(cur) === -1) {
+      const next = names.indexOf(SHEET_DEFAULT) !== -1 ? SHEET_DEFAULT : names[0];
+      el.value = next;
+      camSaveSheetInput();
+    }
+    camRenderSheetList();
+  }).catch(function() {
+    // 通信に失敗したら手入力のまま（保存済みの値か空欄）使う
+  });
+})();
 // verx-index.html の verx_parseQuery と同一規則（数量抽出・全角正規化）。
 function cam_parseQuery(query) {
   let q = String(query || '').replace(/[Ａ-Ｚａ-ｚ０-９]/g, function(s) {
@@ -300,6 +421,8 @@ function cam_armWatchdog(item, ms) {
     }
   }, ms);
 }
+// 表示用の番号はユニットNoのみ（部品Noの連番は表示しない）。unitNo が無い行は従来の number を使う。
+function cam_dispNo(r) { return (r && (r.unitNo || r.number)) || ''; }
 function cam_applySearchResult(item, results, queryText) {
   item.results = results || [];
   item.selIndex = 0;
@@ -322,9 +445,16 @@ async function cam_processShot(item) {
   renderCamCard(item.id);
   const parsed = cam_parseQuery(ocr.text);
   item.detectedQty = parsed.qty;
+  const targetSheet = getTargetSheet();
+  if (!targetSheet) {
+    item.status = 'failed';
+    item.error = '製番（対象シート）が入力されていません。上の製番欄に入力してください。';
+    renderCamCard(item.id);
+    return;
+  }
   cam_armWatchdog(item, 30000);
   try {
-    const data = await camApi('search', { query: parsed.query, targetSheet: '', targetBox: '', targetZNo: '' });
+    const data = await camApi('search', { query: parsed.query, targetSheet: targetSheet, targetBox: '', targetZNo: '' });
     cam_applySearchResult(item, data.results || [], item.text);
     setLog('⚡ OCR抽出(' + (ocr.secs || '?') + '秒): ' + ocr.text);
   } catch (err) {
@@ -577,10 +707,10 @@ function camSummaryHtml(item) {
   let inner = '';
   if (item.status === 'done' && item.results.length) {
     const top = item.results[item.selIndex] || item.results[0];
-    inner = '最上位: <b>' + top.number + '</b> ' + top.name + ' ／ ヒット度 ' + top.score + '点 ／ ' + top.checkCount + ' / ' + top.orderCount + ' 個';
+    inner = '最上位: <b>' + cam_dispNo(top) + '</b> ' + top.name + ' ／ ヒット度 ' + top.score + '点 ／ ' + top.checkCount + ' / ' + top.orderCount + ' 個' + (top.shogo === '対象外' ? ' ／ 対象外・消込済' : '');
   } else if (item.status === 'registered') {
     const top = item.results[item.selIndex] || item.results[0];
-    inner = '✅ 登録しました: <b>' + top.number + '</b> ' + top.checkCount + ' / ' + top.orderCount + ' 個';
+    inner = '✅ 登録しました: <b>' + cam_dispNo(top) + '</b> ' + top.checkCount + ' / ' + top.orderCount + ' 個' + (top.shogo === '対象外' ? ' ／ 対象外・消込済' : '');
   } else if (item.status === 'nohit') {
     inner = '該当するデータが見つかりませんでした。「' + ocrPreview + '」';
   } else if (item.status === 'failed') {
@@ -613,7 +743,8 @@ function camDetailBodyHtml(item) {
       + '<div class="q-row"><select id="cam-add-qty-' + item.id + '" style="width:120px; flex:none; background-color:#f1f6fb;">' + cam_qtyOptions(sel, item.detectedQty) + '</select>'
       + '<button class="q-btn" onclick="camRegister(\'' + item.id + '\')">登録</button></div>' + cancelHtml;
   }
-  return '<div class="q-title">' + sel.number + '</div>' + extraHtml + modelHtml
+  const shogoBadgeHtml = sel.shogo === '対象外' ? '<div style="font-size:13px; color:#fff; background:#78909c; font-weight:bold; padding:4px 8px; border-radius:4px; margin-bottom:5px; display:inline-block;">対象外・消込済</div>' : '';
+  return shogoBadgeHtml + '<div class="q-title">' + cam_dispNo(sel) + '</div>' + extraHtml + modelHtml
     + '<div style="font-size:14px; margin-top:4px;">品名: ' + sel.name + '</div>'
     + btnHtml
     + (item.regError ? '<div class="q-err">' + item.regError + '</div>' : '');
@@ -647,7 +778,7 @@ function renderCamCard(id) {
     const sel = item.results[item.selIndex] || item.results[0];
     let candOptions = '';
     item.results.forEach(function(r, i) {
-      candOptions += '<option value="' + i + '"' + (i === item.selIndex ? ' selected' : '') + '>' + (i + 1) + '位 ' + r.number + '（' + r.score + '点）</option>';
+      candOptions += '<option value="' + i + '"' + (i === item.selIndex ? ' selected' : '') + '>' + (i + 1) + '位 ' + cam_dispNo(r) + '（' + r.score + '点）' + (r.shogo === '対象外' ? '【対象外】' : '') + '</option>';
     });
     detailHtml = '<div class="q-detail">'
       + '<div class="q-row"><span style="font-size:13px; font-weight:bold;">候補:</span><select onchange="camSelectCandidate(\'' + item.id + '\', this.value)">' + candOptions + '</select></div>'
@@ -657,6 +788,10 @@ function renderCamCard(id) {
   } else if (item.expanded && item.regError) {
     detailHtml = '<div class="q-err">' + item.regError + '</div>';
   }
+  // ★ 第19段階相当: 対象の行が対象外・消込済ならカード全体をグレーアウトする
+  const topForShogo = (item.status === 'done' || item.status === 'registered') && item.results.length ? (item.results[item.selIndex] || item.results[0]) : null;
+  if (topForShogo && topForShogo.shogo === '対象外') { el.style.opacity = '0.55'; el.style.background = '#eceff1'; }
+  else { el.style.opacity = ''; el.style.background = ''; }
   let ocrHtml = '';
   if (item.text) {
     ocrHtml = '<button class="q-ocr-toggle" onclick="event.stopPropagation(); camToggleOcrText(\'' + item.id + '\')">'
@@ -693,6 +828,9 @@ function camSelectCandidate(id, idx) {
   if (summaryEl && bodyEl && cardEl) {
     summaryEl.outerHTML = camSummaryHtml(item);
     bodyEl.innerHTML = camDetailBodyHtml(item);
+    const top = (item.status === 'done' || item.status === 'registered') && item.results.length ? (item.results[item.selIndex] || item.results[0]) : null;
+    if (top && top.shogo === '対象外') { cardEl.style.opacity = '0.55'; cardEl.style.background = '#eceff1'; }
+    else { cardEl.style.opacity = ''; cardEl.style.background = ''; }
     return;
   }
   renderCamCard(id);
@@ -710,11 +848,34 @@ function camRegister(id) {
   const qtyEl = document.getElementById('cam-add-qty-' + id);
   const qty = qtyEl ? qtyEl.value : '1';
   const boxLabel = currentBox ? ('箱: ' + currentBox) : '箱なし';
-  if (!confirm('登録しますか？\n' + sel.number + ' ' + sel.name + '\n' + qty + '個 ／ ' + boxLabel)) return;
+  if (!confirm('登録しますか？\n' + cam_dispNo(sel) + ' ' + sel.name + '\n' + qty + '個 ／ ' + boxLabel)) return;
+  camDoRegister(id, sel, qty, false);
+}
+// ★ 第20段階相当: 登録の実処理。サーバーが箱のZ番号の確認（zConfirm）を返したら
+// ポップアップで確認し、OKなら forceZ=true で再送する。キャンセルなら登録しない。
+// 直接通信に失敗したときは従来通り postMessage 経由へフォールバックする
+// （フォールバック先ではZ確認はアプリ側キューで案内される）。
+function camDoRegister(id, sel, qty, forceZ) {
+  const item = camFind(id);
+  if (!item) return;
   item.status = 'registering';
   item.regError = '';
   renderCamCard(id);
-  camApi('register', { sheetName: sel.sheetName, rowIndex: sel.rowIndex, addQty: qty, box: currentBox, orderKey: sel.orderKey || null }).then(function(data) {
+  camApi('register', { sheetName: sel.sheetName, rowIndex: sel.rowIndex, addQty: qty, box: currentBox, orderKey: sel.orderKey || null, forceZ: forceZ }).then(function(data) {
+    if (data && data.zConfirm) {
+      const zc = data.zConfirm;
+      item.status = 'done';
+      item.expanded = true;
+      renderCamCard(id);
+      if (confirm('この箱には ' + zc.boxZNos.join('、') + ' の物が入っています。\n' + zc.itemZNo + ' の物を同じ箱に登録しますか？')) {
+        camDoRegister(id, sel, qty, true);
+      } else {
+        item.regError = '登録をやめました（箱のZ番号が違います）。';
+        renderCamCard(id);
+        setLog('登録をやめました。');
+      }
+      return;
+    }
     sel.checkCount = data.checkCount;
     sel.orderCount = data.orderCount;
     sel.exportedCount = data.exportedCount;
@@ -738,7 +899,7 @@ function camCancel(id) {
   const sel = item.results[item.selIndex] || item.results[0];
   const qtyEl = document.getElementById('cam-cancel-qty-' + id);
   const cancelVal = qtyEl ? qtyEl.value : 'ALL_CANCEL';
-  if (!confirm('取り消しますか？\n' + sel.number + ' ' + sel.name + '\n取消: ' + cancelVal)) return;
+  if (!confirm('取り消しますか？\n' + cam_dispNo(sel) + ' ' + sel.name + '\n取消: ' + cancelVal)) return;
   item.status = 'registering';
   item.regError = '';
   renderCamCard(id);
