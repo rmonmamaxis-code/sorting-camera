@@ -5,6 +5,11 @@
      OCR（Stage 11 の2パス）はこのページ内で行い、検索・登録・取消は ver.X の exec URL へ
      直接 fetch POST する（doPost）。GAS タブがバックグラウンド／閉じていても進む。
      直接つながらない場合のみ、元のアプリ（GAS タブ）への postMessage 経由へフォールバックする。
+     2026-11-17 QR振り分け追加:
+       - QRの中身が「箱識別コード 番号」（例: 箱識別コード A1234）のときだけ箱として扱い、
+         番号部分だけを箱に設定する。それ以外のQRは部品として撮影キューに入れ、
+         OCRを通さずQRの文字そのままで検索する。同じQRを映し続けてもキューには1回だけ入れ、
+         QRが画角から外れてから映し直せば再読み取りできる。
      2026-11-17 最新化（5.0.1 側 Stage 19/20 相当を反映）:
        - 製番（対象シート）プルダウンを追加。サーバーからシート名を取り、手入力で絞り込みできる。
          既定は A200001UR（保存済みの製番が無くなっていたら A200001UR、無ければ先頭のシート）。
@@ -463,6 +468,41 @@ async function cam_processShot(item) {
     cam_fallbackCapture(item);
   }
 }
+// 部品のQRを撮影キューに入れる。写真は無いので OCR は通さず、QR の文字で検索する。
+function cam_addQrItem(text) {
+  const id = 'c' + (camNextId++);
+  const item = {
+    id: id, thumb: '', text: text, source: 'qr', image: '',
+    status: 'searching', error: '', results: [], selIndex: 0, expanded: true, showOcrText: false,
+    detectedQty: null, regError: '', pendingOp: null, directFailed: false, watchdog: null
+  };
+  camQueueItems.push(item);
+  renderCamCard(id);
+  setLog('QRで部品を読み取りました: ' + text);
+  cam_processQrItem(item);
+}
+async function cam_processQrItem(item) {
+  const parsed = cam_parseQuery(item.text);
+  item.detectedQty = parsed.qty;
+  const targetSheet = getTargetSheet();
+  if (!targetSheet) {
+    item.status = 'failed';
+    item.error = '製番（対象シート）が入力されていません。上の製番欄に入力してください。';
+    renderCamCard(item.id);
+    return;
+  }
+  cam_armWatchdog(item, 30000);
+  try {
+    const data = await camApi('search', { query: parsed.query, targetSheet: targetSheet, targetBox: '', targetZNo: '' });
+    cam_applySearchResult(item, data.results || [], item.text);
+    setLog('⚡ QR検索: ' + item.text);
+  } catch (err) {
+    // QR のカードは画像が無いため postMessage フォールバックは使えない。
+    item.status = 'failed';
+    item.error = '直接通信に失敗しました。通信状況を確認して、もう一度QRを映してください。';
+    renderCamCard(item.id);
+  }
+}
 // フォールバック：元のアプリ（GAS タブ）に画像を送り、そちらで OCR＋検索してもらう。
 function cam_fallbackCapture(item) {
   if (!postToGas({ type: 'capture', queueId: item.id, image: item.image, thumb: item.thumb })) {
@@ -538,12 +578,39 @@ function qrShowManualNote(text) {
     note.innerText = text;
   }
 }
-function qrHandleValue(raw) {
+// QR の中身の振り分け: 「箱識別コード 番号」だけを箱とし、番号部分だけを取り出す。
+// それ以外は部品のQRとして、その文字のまま検索にかける。
+function cam_parseQrValue(raw) {
   const value = String(raw || '').trim();
-  if (!value) return;
-  lastQrValue = value;
-  if (value === currentBox) { hideQrButton(); return; }
-  if (value !== qrButtonValue) showQrButton(value);
+  if (!value) return null;
+  const m = value.match(/^箱識別コード[\s　]+(.+)$/);
+  if (m) {
+    const box = m[1].trim();
+    if (box) return { type: 'box', box: box };
+  }
+  return { type: 'part', text: value };
+}
+let qrMissCount = 0;
+// QR が画角から外れたら、同じQRを再読み取りできるようにする。
+function qrHandleNoCode() {
+  qrMissCount++;
+  if (qrMissCount >= 4) { lastQrValue = ''; qrMissCount = 0; }
+}
+function qrHandleValue(raw) {
+  const parsed = cam_parseQrValue(raw);
+  if (!parsed) return;
+  qrMissCount = 0;
+  if (parsed.type === 'box') {
+    lastQrValue = String(raw || '').trim();
+    if (parsed.box === currentBox) { hideQrButton(); return; }
+    if (parsed.box !== qrButtonValue) showQrButton(parsed.box);
+    return;
+  }
+  // 部品のQR: 同じQRを映し続けている間はキューに1回だけ入れる。
+  if (parsed.text === lastQrValue) return;
+  lastQrValue = parsed.text;
+  hideQrButton();
+  cam_addQrItem(parsed.text);
 }
 function initQrDetector() {
   if ('BarcodeDetector' in window) {
@@ -594,7 +661,7 @@ async function scanQrFrame() {
     return;
   }
   qrFailCount = 0;
-  if (!codes || !codes.length) return;
+  if (!codes || !codes.length) { qrHandleNoCode(); return; }
   const raw = codes[0] && codes[0].rawValue ? String(codes[0].rawValue) : '';
   qrHandleValue(raw);
 }
@@ -617,7 +684,7 @@ function scanQrFrameJsQR() {
     const img = ctx.getImageData(0, 0, w, h);
     // 箱の QR は通常の黒 on 白のため dontInvert で十分。反転 QR は対象外。
     const res = jsQR(img.data, w, h, { inversionAttempts: 'dontInvert' });
-    if (res && res.data) qrHandleValue(res.data);
+    if (res && res.data) qrHandleValue(res.data); else qrHandleNoCode();
   } catch (e) {
     // jsQR の 1 回分の失敗は無視する（次フレームで再試行）。連続失敗で止めない。
   } finally {
@@ -888,6 +955,13 @@ function camDoRegister(id, sel, qty, forceZ) {
     renderCamCard(id);
     setLog('登録しました。');
   }).catch(function(err) {
+    if (item.source === 'qr') {
+      item.status = 'done';
+      item.regError = '直接通信に失敗しました。もう一度登録してください。';
+      renderCamCard(id);
+      setLog('直接通信に失敗しました。');
+      return;
+    }
     item.pendingOp = { type: 'register', qty: String(qty) };
     setLog('直接通信に失敗したため元のアプリ経由で処理しています。');
     cam_fallbackCapture(item);
@@ -916,6 +990,13 @@ function camCancel(id) {
     renderCamCard(id);
     setLog('取り消しました。');
   }).catch(function(err) {
+    if (item.source === 'qr') {
+      item.status = 'done';
+      item.regError = '直接通信に失敗しました。もう一度取り消してください。';
+      renderCamCard(id);
+      setLog('直接通信に失敗しました。');
+      return;
+    }
     item.pendingOp = { type: 'cancel', cancelVal: String(cancelVal) };
     setLog('直接通信に失敗したため元のアプリ経由で処理しています。');
     cam_fallbackCapture(item);
@@ -1050,7 +1131,7 @@ async function startCamera() {
       }
     } catch (e) { /* 対応していない端末では無視 */ }
     shutterBtn.disabled = false;
-    setLog('カメラ起動中です。枠の中にラベルを入れて「📷 撮影」を押してください。箱のQRを映すと上のボタンから箱を設定できます。');
+    setLog('カメラ起動中です。枠の中にラベルを入れて「📷 撮影」を押してください。「箱識別コード」のQRを映すと箱を設定できます。部品のQRを映すとキューに入って検索します。');
     initQrDetector();
     sendHello();
   } catch (err) {
