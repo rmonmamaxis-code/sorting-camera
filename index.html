@@ -542,6 +542,8 @@ async function cam_processQrItem(item) {
     const matches = data.matches || [];
     const others = data.others || [];
     if (matches.length) {
+      item.dest = data.dest || null;
+      item.boxChoice = (item.dest && item.dest.box) ? item.dest.box : currentBox;
       cam_applySearchResult(item, matches, item.text);
       setLog('⚡ QR完全一致: 図番 ' + pq.drawingNo + (item.qrSeibanMismatch ? '（製番違い: QRの製番は ' + pq.seiban + '）' : ''));
     } else if (others.length) {
@@ -835,6 +837,12 @@ function camStatusLabel(status) {
   if (status === 'failed') return '❌ 失敗';
   return status;
 }
+// 登録に使う箱: QRカードはカードごとに選んだ箱（初期値はZの行き先）、写真カードは今の箱。
+function cam_itemBox(item) {
+  if (item && item.boxChoice !== undefined && item.boxChoice !== null) return item.boxChoice;
+  return currentBox;
+}
+function camSetBoxChoice(id, v) { const it = camFind(id); if (it) it.boxChoice = v; }
 function camFind(id) {
   return camQueueItems.find(function(q) { return q.id === id; });
 }
@@ -850,7 +858,7 @@ function camSummaryHtml(item) {
   let inner = '';
   if (item.status === 'done' && item.results.length) {
     const top = item.results[item.selIndex] || item.results[0];
-    inner = '最上位: <b>' + cam_dispNo(top) + '</b> ' + top.name + (item.qr ? ' ／ 完全一致' : ' ／ ヒット度 ' + top.score + '点') + ' ／ ' + top.checkCount + ' / ' + top.orderCount + ' 個' + (top.shogo === '対象外' ? ' ／ 対象外・消込済' : '') + (item.qrSeibanMismatch ? ' ／ <b style="color:#c62828;">⚠️製番違い（この部品は ' + item.qr.seiban + '）</b>' : '');
+    inner = '最上位: <b>' + cam_dispNo(top) + '</b> ' + top.name + (item.qr ? ' ／ 完全一致' : ' ／ ヒット度 ' + top.score + '点') + ' ／ ' + top.checkCount + ' / ' + top.orderCount + ' 個' + (top.shogo === '対象外' ? ' ／ 対象外・消込済' : '') + (item.qrSeibanMismatch ? ' ／ <b style="color:#c62828;">⚠️製番違い（この部品は ' + item.qr.seiban + '）</b>' : '') + ((item.dest && item.dest.box) ? ' ／ 行き先: ' + camEsc(item.dest.box) : '');
   } else if (item.status === 'registered') {
     const top = item.results[item.selIndex] || item.results[0];
     inner = '✅ 登録しました: <b>' + cam_dispNo(top) + '</b> ' + top.checkCount + ' / ' + top.orderCount + ' 個' + (top.shogo === '対象外' ? ' ／ 対象外・消込済' : '');
@@ -901,7 +909,23 @@ function camDetailBodyHtml(item) {
       qrBannerHtml = '<div style="font-weight:bold; color:#2e7d32; margin-bottom:4px;">✅ 完全一致（' + (sel.exactLabel || '図番') + '）図番: ' + item.qr.drawingNo + '</div>';
     }
   }
-  return qrBannerHtml + shogoBadgeHtml + '<div class="q-title">' + cam_dispNo(sel) + '</div>' + extraHtml + modelHtml
+  let boxRowHtml = '';
+  if (item.source === 'qr' && item.results.length) {
+    const opts = [];
+    const seenB = {};
+    function addOpt(v, label) { if (v && !seenB[v]) { seenB[v] = true; opts.push({ v: v, label: label }); } }
+    if (item.dest && item.dest.box) addOpt(item.dest.box, item.dest.box + '（' + camEsc(item.dest.zNo) + 'の行き先）');
+    ((item.dest && item.dest.boxesWithZ) || []).forEach(function(b) { addOpt(b, b + '（このZが入っている箱）'); });
+    addOpt(currentBox, currentBox + '（今設定中の箱）');
+    const selVal = cam_itemBox(item);
+    let optHtml = opts.map(function(o) {
+      return '<option value="' + camEsc(o.v) + '"' + (o.v === selVal ? ' selected' : '') + '>' + camEsc(o.label) + '</option>';
+    }).join('');
+    optHtml += '<option value=""' + (selVal === '' ? ' selected' : '') + '>箱なし</option>';
+    boxRowHtml = '<div class="q-row"><span style="font-size:13px; font-weight:bold;">箱:</span>'
+      + '<select id="cam-box-' + item.id + '" onchange="camSetBoxChoice(\'' + item.id + '\', this.value)">' + optHtml + '</select></div>';
+  }
+  return qrBannerHtml + shogoBadgeHtml + boxRowHtml + '<div class="q-title">' + cam_dispNo(sel) + '</div>' + extraHtml + modelHtml
     + '<div style="font-size:14px; margin-top:4px;">品名: ' + sel.name + '</div>'
     + btnHtml
     + (item.regError ? '<div class="q-err">' + item.regError + '</div>' : '');
@@ -1010,7 +1034,8 @@ function camRegister(id) {
   const sel = item.results[item.selIndex] || item.results[0];
   const qtyEl = document.getElementById('cam-add-qty-' + id);
   const qty = qtyEl ? qtyEl.value : '1';
-  const boxLabel = currentBox ? ('箱: ' + currentBox) : '箱なし';
+  const useBox = cam_itemBox(item);
+  const boxLabel = useBox ? ('箱: ' + useBox) : '箱なし';
   if (!confirm('登録しますか？\n' + cam_dispNo(sel) + ' ' + sel.name + '\n' + qty + '個 ／ ' + boxLabel)) return;
   camDoRegister(id, sel, qty, false);
 }
@@ -1024,7 +1049,7 @@ function camDoRegister(id, sel, qty, forceZ) {
   item.status = 'registering';
   item.regError = '';
   renderCamCard(id);
-  camApi('register', { sheetName: sel.sheetName, rowIndex: sel.rowIndex, addQty: qty, box: currentBox, orderKey: sel.orderKey || null, forceZ: forceZ }).then(function(data) {
+  camApi('register', { sheetName: sel.sheetName, rowIndex: sel.rowIndex, addQty: qty, box: cam_itemBox(item), orderKey: sel.orderKey || null, forceZ: forceZ }).then(function(data) {
     if (data && data.zConfirm) {
       const zc = data.zConfirm;
       item.status = 'done';
