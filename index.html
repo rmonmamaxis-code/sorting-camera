@@ -5,6 +5,13 @@
      OCR（Stage 11 の2パス）はこのページ内で行い、検索・登録・取消は ver.X の exec URL へ
      直接 fetch POST する（doPost）。GAS タブがバックグラウンド／閉じていても進む。
      直接つながらない場合のみ、元のアプリ（GAS タブ）への postMessage 経由へフォールバックする。
+     2026-11-19 部品QRの完全一致検索: 部品QRの形式が確定した
+       （「製番:…,手配工番:…,ユニット番号:…,品番:…,改訂:…(任意),図番:…」のキー:値形式）。
+       読み取りミスがほぼ無い前提のため、この形式のQRはあいまい検索ではなく
+       サーバーの完全一致検索（doPost 'qrsearch'）にかける。QRの製番が選択中の製番と
+       違う場合は「製番違い」と分かるバナーを出す。自分の製番に無く他の製番にある場合も
+       製番違いとして場所だけを表示する（そのカードからは登録できない）。
+       この形式に当てはまらないQRは従来どおり文字列のまま検索する。
      2026-11-17 QR重複防止（現場確認を受けて追加）: 部品QRは、キューの直近5件の中に
          同じ読み取り文字のカードがあれば追加しない（登録済みのカードも数える）。
      2026-11-17 QR振り分け追加:
@@ -483,23 +490,77 @@ function cam_addQrItem(text) {
   setLog('QRで部品を読み取りました: ' + text);
   cam_processQrItem(item);
 }
+// 部品QRの確定形式（キー:値のカンマ区切り）を分解する。形式外なら null。
+function cam_parsePartQr(text) {
+  const t = String(text || '').trim();
+  if (t.indexOf(':') === -1 && t.indexOf('：') === -1) return null;
+  const obj = {};
+  t.split(/[,、]/).forEach(function(part) {
+    const m = part.match(/^\s*([^:：]+)[:：](.*)$/);
+    if (m) obj[m[1].trim()] = m[2].trim();
+  });
+  if (!obj['図番'] && !(obj['ユニット番号'] && obj['品番'])) return null;
+  return {
+    seiban: obj['製番'] || '',
+    drawingNo: obj['図番'] || '',
+    unitNo: obj['ユニット番号'] || '',
+    partNo: obj['品番'] || '',
+    revision: obj['改訂'] || ''
+  };
+}
 async function cam_processQrItem(item) {
-  const parsed = cam_parseQuery(item.text);
-  item.detectedQty = parsed.qty;
-  const targetSheet = getTargetSheet();
-  if (!targetSheet) {
-    item.status = 'failed';
-    item.error = '製番（対象シート）が入力されていません。上の製番欄に入力してください。';
-    renderCamCard(item.id);
+  const pq = cam_parsePartQr(item.text);
+  if (!pq) {
+    // 形式外のQRは従来どおり、QRの文字そのままで（あいまい）検索する。
+    const parsed = cam_parseQuery(item.text);
+    item.detectedQty = parsed.qty;
+    const targetSheet0 = getTargetSheet();
+    if (!targetSheet0) {
+      item.status = 'failed';
+      item.error = '製番（対象シート）が入力されていません。上の製番欄に入力してください。';
+      renderCamCard(item.id);
+      return;
+    }
+    cam_armWatchdog(item, 30000);
+    try {
+      const data = await camApi('search', { query: parsed.query, targetSheet: targetSheet0, targetBox: '', targetZNo: '' });
+      cam_applySearchResult(item, data.results || [], item.text);
+      setLog('⚡ QR検索: ' + item.text);
+    } catch (err) {
+      item.status = 'failed';
+      item.error = '直接通信に失敗しました。通信状況を確認して、もう一度QRを映してください。';
+      renderCamCard(item.id);
+    }
     return;
   }
+  // 確定形式のQRは完全一致検索。検索先はQRに書かれた製番のシート。
+  item.qr = pq;
+  item.qrSeibanMismatch = !!(pq.seiban && pq.seiban !== getTargetSheet());
   cam_armWatchdog(item, 30000);
   try {
-    const data = await camApi('search', { query: parsed.query, targetSheet: targetSheet, targetBox: '', targetZNo: '' });
-    cam_applySearchResult(item, data.results || [], item.text);
-    setLog('⚡ QR検索: ' + item.text);
+    const data = await camApi('qrsearch', { seiban: pq.seiban, drawingNo: pq.drawingNo, unitNo: pq.unitNo, partNo: pq.partNo });
+    const matches = data.matches || [];
+    const others = data.others || [];
+    if (matches.length) {
+      cam_applySearchResult(item, matches, item.text);
+      setLog('⚡ QR完全一致: 図番 ' + pq.drawingNo + (item.qrSeibanMismatch ? '（製番違い: QRの製番は ' + pq.seiban + '）' : ''));
+    } else if (others.length) {
+      item.results = [];
+      item.otherMatches = others;
+      item.status = 'nohit';
+      item.error = '';
+      renderCamCard(item.id);
+      setLog('⚠️ 製番違い: 図番 ' + pq.drawingNo + ' は「' + others[0].sheetName + '」のシートにあります。');
+    } else {
+      item.results = [];
+      item.status = 'nohit';
+      item.error = (data.sheetFound === false && pq.seiban)
+        ? '製番シート「' + pq.seiban + '」がありません。'
+        : '図番 ' + pq.drawingNo + ' の完全一致がありません。';
+      renderCamCard(item.id);
+      setLog('QR完全一致なし: 図番 ' + pq.drawingNo);
+    }
   } catch (err) {
-    // QR のカードは画像が無いため postMessage フォールバックは使えない。
     item.status = 'failed';
     item.error = '直接通信に失敗しました。通信状況を確認して、もう一度QRを映してください。';
     renderCamCard(item.id);
@@ -789,12 +850,18 @@ function camSummaryHtml(item) {
   let inner = '';
   if (item.status === 'done' && item.results.length) {
     const top = item.results[item.selIndex] || item.results[0];
-    inner = '最上位: <b>' + cam_dispNo(top) + '</b> ' + top.name + ' ／ ヒット度 ' + top.score + '点 ／ ' + top.checkCount + ' / ' + top.orderCount + ' 個' + (top.shogo === '対象外' ? ' ／ 対象外・消込済' : '');
+    inner = '最上位: <b>' + cam_dispNo(top) + '</b> ' + top.name + (item.qr ? ' ／ 完全一致' : ' ／ ヒット度 ' + top.score + '点') + ' ／ ' + top.checkCount + ' / ' + top.orderCount + ' 個' + (top.shogo === '対象外' ? ' ／ 対象外・消込済' : '') + (item.qrSeibanMismatch ? ' ／ <b style="color:#c62828;">⚠️製番違い（この部品は ' + item.qr.seiban + '）</b>' : '');
   } else if (item.status === 'registered') {
     const top = item.results[item.selIndex] || item.results[0];
     inner = '✅ 登録しました: <b>' + cam_dispNo(top) + '</b> ' + top.checkCount + ' / ' + top.orderCount + ' 個' + (top.shogo === '対象外' ? ' ／ 対象外・消込済' : '');
   } else if (item.status === 'nohit') {
-    inner = '該当するデータが見つかりませんでした。「' + ocrPreview + '」';
+    if (item.otherMatches && item.otherMatches.length) {
+      inner = '⚠️ <b style="color:#c62828;">製番違い</b>: この図番は「' + item.otherMatches[0].sheetName + '」のシートにあります（QRの製番には該当なし）';
+    } else if (item.qr && item.error) {
+      inner = '該当なし: ' + item.error;
+    } else {
+      inner = '該当するデータが見つかりませんでした。「' + ocrPreview + '」';
+    }
   } else if (item.status === 'failed') {
     inner = '失敗: ' + (item.error || '解析できませんでした。');
   } else if (item.status === 'registering') {
@@ -826,7 +893,15 @@ function camDetailBodyHtml(item) {
       + '<button class="q-btn" onclick="camRegister(\'' + item.id + '\')">登録</button></div>' + cancelHtml;
   }
   const shogoBadgeHtml = sel.shogo === '対象外' ? '<div style="font-size:13px; color:#fff; background:#78909c; font-weight:bold; padding:4px 8px; border-radius:4px; margin-bottom:5px; display:inline-block;">対象外・消込済</div>' : '';
-  return shogoBadgeHtml + '<div class="q-title">' + cam_dispNo(sel) + '</div>' + extraHtml + modelHtml
+  let qrBannerHtml = '';
+  if (item.qr) {
+    if (item.qrSeibanMismatch) {
+      qrBannerHtml = '<div style="background:#ffecb3; border:2px solid #f9a825; border-radius:6px; padding:6px 8px; font-weight:bold; color:#bf360c; margin-bottom:6px;">⚠️ 製番違い<br>この部品の製番は「' + item.qr.seiban + '」です（選択中: ' + getTargetSheet() + '）</div>';
+    } else {
+      qrBannerHtml = '<div style="font-weight:bold; color:#2e7d32; margin-bottom:4px;">✅ 完全一致（' + (sel.exactLabel || '図番') + '）図番: ' + item.qr.drawingNo + '</div>';
+    }
+  }
+  return qrBannerHtml + shogoBadgeHtml + '<div class="q-title">' + cam_dispNo(sel) + '</div>' + extraHtml + modelHtml
     + '<div style="font-size:14px; margin-top:4px;">品名: ' + sel.name + '</div>'
     + btnHtml
     + (item.regError ? '<div class="q-err">' + item.regError + '</div>' : '');
@@ -867,6 +942,12 @@ function renderCamCard(id) {
       + '<div id="cam-detail-body-' + item.id + '">' + camDetailBodyHtml(item) + '</div>'
       + '</div>';
 
+  } else if (item.expanded && item.otherMatches && item.otherMatches.length) {
+    let rows = '';
+    item.otherMatches.forEach(function(r) {
+      rows += '<div style="padding:4px 0; border-bottom:1px solid #ffe0b2;">「' + r.sheetName + '」: <b>' + cam_dispNo(r) + '</b> ' + r.name + ' ／ ' + r.checkCount + ' / ' + r.orderCount + ' 個</div>';
+    });
+    detailHtml = '<div class="q-detail"><div style="background:#ffecb3; border:2px solid #f9a825; border-radius:6px; padding:6px 8px; font-weight:bold; color:#bf360c; margin-bottom:6px;">⚠️ 製番違い<br>この図番は別の製番のシートにあります。このカードからは登録できません。</div>' + rows + '</div>';
   } else if (item.expanded && item.regError) {
     detailHtml = '<div class="q-err">' + item.regError + '</div>';
   }
