@@ -174,6 +174,13 @@ const ST11_PASS1_QUALITY = 0.85;
 const ST11_CROP_PAD = 24;
 const ST11_CROP_QUALITY = 0.9;
 const ST11_OCR_TIMEOUT_MS = 20000;
+// エラーの中身を短く表示するための整形（2026-11-20: 汎用メッセージで握りつぶさない）。
+function cam_errDetail(err) {
+  if (!err) return '不明なエラー';
+  const n = err.name || 'Error';
+  const m = err.message || String(err);
+  return (n + ': ' + m).slice(0, 140);
+}
 async function camApi(action, body) {
   const controller = new AbortController();
   const timer = setTimeout(function() { controller.abort(); }, CAM_API_TIMEOUT_MS);
@@ -183,8 +190,12 @@ async function camApi(action, body) {
       method: 'POST', headers: { 'Content-Type': 'text/plain' },
       body: JSON.stringify(payload), signal: controller.signal
     });
-    const data = await res.json();
-    if (!data || data.ok === false) throw new Error((data && data.error) || 'サーバーエラーが発生しました。');
+    const text = await res.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch (e) {
+      throw new Error('サーバーの応答がJSONではありません（HTTP ' + res.status + '）: ' + text.slice(0, 80));
+    }
+    if (!data || data.ok === false) throw new Error((data && data.error) || ('サーバーエラーが発生しました（HTTP ' + res.status + '）'));
     return data;
   } finally { clearTimeout(timer); }
 }
@@ -474,7 +485,7 @@ async function cam_processShot(item) {
     setLog('⚡ OCR抽出(' + (ocr.secs || '?') + '秒): ' + ocr.text);
   } catch (err) {
     item.directFailed = true;
-    setLog('直接通信に失敗したため元のアプリ経由で処理しています。');
+    setLog('直接通信に失敗したため元のアプリ経由で処理しています（' + cam_errDetail(err) + '）。');
     cam_fallbackCapture(item);
   }
 }
@@ -529,7 +540,7 @@ async function cam_processQrItem(item) {
       setLog('⚡ QR検索: ' + item.text);
     } catch (err) {
       item.status = 'failed';
-      item.error = '直接通信に失敗しました。通信状況を確認して、もう一度QRを映してください。';
+      item.error = '直接通信に失敗しました（' + cam_errDetail(err) + '）。通信状況を確認して、もう一度QRを映してください。';
       renderCamCard(item.id);
     }
     return;
@@ -565,7 +576,7 @@ async function cam_processQrItem(item) {
     }
   } catch (err) {
     item.status = 'failed';
-    item.error = '直接通信に失敗しました。通信状況を確認して、もう一度QRを映してください。';
+    item.error = '直接通信に失敗しました（' + cam_errDetail(err) + '）。通信状況を確認して、もう一度QRを映してください。';
     renderCamCard(item.id);
   }
 }
@@ -1079,13 +1090,13 @@ function camDoRegister(id, sel, qty, forceZ) {
   }).catch(function(err) {
     if (item.source === 'qr') {
       item.status = 'done';
-      item.regError = '直接通信に失敗しました。もう一度登録してください。';
+      item.regError = '直接通信に失敗しました（' + cam_errDetail(err) + '）。もう一度登録してください。';
       renderCamCard(id);
-      setLog('直接通信に失敗しました。');
+      setLog('直接通信に失敗しました（' + cam_errDetail(err) + '）。');
       return;
     }
     item.pendingOp = { type: 'register', qty: String(qty) };
-    setLog('直接通信に失敗したため元のアプリ経由で処理しています。');
+    setLog('直接通信に失敗したため元のアプリ経由で処理しています（' + cam_errDetail(err) + '）。');
     cam_fallbackCapture(item);
   });
 }
@@ -1114,13 +1125,13 @@ function camCancel(id) {
   }).catch(function(err) {
     if (item.source === 'qr') {
       item.status = 'done';
-      item.regError = '直接通信に失敗しました。もう一度取り消してください。';
+      item.regError = '直接通信に失敗しました（' + cam_errDetail(err) + '）。もう一度取り消してください。';
       renderCamCard(id);
-      setLog('直接通信に失敗しました。');
+      setLog('直接通信に失敗しました（' + cam_errDetail(err) + '）。');
       return;
     }
     item.pendingOp = { type: 'cancel', cancelVal: String(cancelVal) };
-    setLog('直接通信に失敗したため元のアプリ経由で処理しています。');
+    setLog('直接通信に失敗したため元のアプリ経由で処理しています（' + cam_errDetail(err) + '）。');
     cam_fallbackCapture(item);
   });
 }
