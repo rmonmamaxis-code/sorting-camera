@@ -167,7 +167,7 @@ function sendHello() {
 // GAS は 302 で振り向けても本体は読める想定だが、読めないブラウザでは
 // fetch が失敗し、呼び出し側が postMessage 経由へフォールバックする（実機未検証）。
 const CAMERA_API_URL = "https://script.google.com/macros/s/AKfycbxdnbc1ZLNjD32HCn4FR70fXoDQPDjW70g7EHBX9z0fMgdoLOb9EF-rnUCKp-_ZafN_AA/exec";
-const CAM_API_TIMEOUT_MS = 20000;
+const CAM_API_TIMEOUT_MS = 45000;
 const VISION_API_KEY = "AIzaSyCle1_tGfXl9tszEp_sW_CoSy5m2A2GPcI";
 const ST11_PASS1_MAX = 1600;
 const ST11_PASS1_QUALITY = 0.85;
@@ -435,8 +435,9 @@ function cam_armWatchdog(item, ms) {
     }
   }, ms);
 }
-// 表示用の番号はユニットNoのみ（部品Noの連番は表示しない）。unitNo が無い行は従来の number を使う。
-function cam_dispNo(r) { return (r && (r.unitNo || r.number)) || ''; }
+// 表示用の番号はユニットNo＋部品Noの組み合わせ（例: Z02-021）。number が無い行は unitNo を使う。
+// （2026-11-20 ユーザー指示: Z02000 のようなユニットNo単独表示は見づらいため変更）
+function cam_dispNo(r) { return (r && (r.number || r.unitNo)) || ''; }
 function cam_applySearchResult(item, results, queryText) {
   item.results = results || [];
   item.selIndex = 0;
@@ -521,7 +522,7 @@ async function cam_processQrItem(item) {
       renderCamCard(item.id);
       return;
     }
-    cam_armWatchdog(item, 30000);
+    cam_armWatchdog(item, 60000);
     try {
       const data = await camApi('search', { query: parsed.query, targetSheet: targetSheet0, targetBox: '', targetZNo: '' });
       cam_applySearchResult(item, data.results || [], item.text);
@@ -536,7 +537,7 @@ async function cam_processQrItem(item) {
   // 確定形式のQRは完全一致検索。検索先はQRに書かれた製番のシート。
   item.qr = pq;
   item.qrSeibanMismatch = !!(pq.seiban && pq.seiban !== getTargetSheet());
-  cam_armWatchdog(item, 30000);
+  cam_armWatchdog(item, 60000);
   try {
     const data = await camApi('qrsearch', { seiban: pq.seiban, drawingNo: pq.drawingNo, unitNo: pq.unitNo, partNo: pq.partNo });
     const matches = data.matches || [];
