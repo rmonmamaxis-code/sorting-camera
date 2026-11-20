@@ -174,6 +174,10 @@ const ST11_PASS1_QUALITY = 0.85;
 const ST11_CROP_PAD = 24;
 const ST11_CROP_QUALITY = 0.9;
 const ST11_OCR_TIMEOUT_MS = 20000;
+// HTMLエスケープ（箱名などの表示用）。
+function camEsc(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
 // エラーの中身を短く表示するための整形（2026-11-20: 汎用メッセージで握りつぶさない）。
 function cam_errDetail(err) {
   if (!err) return '不明なエラー';
