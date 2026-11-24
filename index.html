@@ -54,7 +54,7 @@
   .shutter { width: 92px; height: 92px; border-radius: 50%; border: 5px solid #fff; background: #00897b; color: #fff; font-size: 15px; font-weight: bold; cursor: pointer; }
   .shutter:disabled { background: #78909c; }
   .sub { padding: 12px 18px; font-size: 15px; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; background: #546e7a; color: #fff; margin: 4px; }
-  #log { margin-top: 12px; font-size: 14px; font-weight: bold; background: #37474f; padding: 10px; border-radius: 8px; text-align: left; min-height: 20px; word-break: break-all; }
+  #log { margin-top: 12px; font-size: 14px; font-weight: bold; background: #37474f; padding: 10px; border-radius: 8px; text-align: left; min-height: 20px; word-break: break-all; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   #shotCount { margin-top: 8px; font-size: 13px; color: #b0bec5; }
   .err { background: #ffebee; color: #c62828; font-weight: bold; padding: 12px; border-radius: 8px; text-align: left; margin-bottom: 10px; }
   .warn { background: #fff8e1; color: #e65100; font-weight: bold; padding: 12px; border-radius: 8px; text-align: left; margin-bottom: 10px; font-size: 14px; }
@@ -128,6 +128,16 @@
 <div id="log">カメラを起動しています…</div>
 <div id="shotCount"></div>
 
+<div id="camConfirm" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:999; align-items:center; justify-content:center;">
+  <div style="background:#fff; color:#263238; border-radius:10px; padding:18px; width:86%; max-width:420px;">
+    <div id="camConfirmMsg" style="font-size:15px; font-weight:bold; white-space:pre-wrap; text-align:left;"></div>
+    <div style="display:flex; gap:10px; margin-top:16px;">
+      <button type="button" onclick="cam_confirmDone(false)" style="flex:1; padding:12px; font-size:15px; font-weight:bold; border:none; border-radius:8px; background:#eceff1; color:#37474f; cursor:pointer;">やめる</button>
+      <button type="button" id="camConfirmOk" onclick="cam_confirmDone(true)" style="flex:1; padding:12px; font-size:15px; font-weight:bold; border:none; border-radius:8px; background:#00897b; color:#fff; cursor:pointer;">OK</button>
+    </div>
+  </div>
+</div>
+
 <div id="queueSection">
   <h2>📷 撮影キュー <span id="queueCount"></span></h2>
   <div id="queueArea"></div>
@@ -180,7 +190,7 @@ function camEsc(s) {
 }
 // 動作状況欄に出す読み取り文字を、20文字×2行分（40文字）で切り上げる（続きは … で示す）。
 function cam_logClip(s) {
-  const t = String(s == null ? '' : s);
+  const t = String(s == null ? '' : s).replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
   return t.length > 40 ? t.slice(0, 40) + '…' : t;
 }
 // 検索結果の行から Z番号を取り出す（組み合わせ番号の先頭、またはユニット№から）。
@@ -896,6 +906,26 @@ function cam_itemBox(item) {
   return currentBox;
 }
 function camSetBoxChoice(id, v) { const it = camFind(id); if (it) { it.boxChoice = v; it.boxTouched = true; } }
+// 画面内の確認ダイアログ。ブラウザ標準の confirm() は Android Chrome で
+// カメラ映像の描画レイヤーを壊すことがあるため使わない（2026-11-24）。
+let camConfirmResolve = null;
+function cam_confirm(message, okLabel) {
+  return new Promise(function(resolve) {
+    const wrap = document.getElementById('camConfirm');
+    const msg = document.getElementById('camConfirmMsg');
+    const okBtn = document.getElementById('camConfirmOk');
+    if (!wrap || !msg || !okBtn) { resolve(window.confirm(message)); return; }
+    msg.textContent = message;
+    okBtn.textContent = okLabel || 'OK';
+    camConfirmResolve = resolve;
+    wrap.style.display = 'flex';
+  });
+}
+function cam_confirmDone(v) {
+  const wrap = document.getElementById('camConfirm');
+  if (wrap) wrap.style.display = 'none';
+  if (camConfirmResolve) { const r = camConfirmResolve; camConfirmResolve = null; r(v); }
+}
 function camFind(id) {
   return camQueueItems.find(function(q) { return q.id === id; });
 }
@@ -1083,7 +1113,7 @@ function camDelete(id) {
   if (el) el.remove();
   camUpdateCount();
 }
-function camRegister(id) {
+async function camRegister(id) {
   const item = camFind(id);
   if (!item || !item.results.length || item.status === 'registering') return;
   const sel = item.results[item.selIndex] || item.results[0];
@@ -1091,7 +1121,7 @@ function camRegister(id) {
   const qty = qtyEl ? qtyEl.value : '1';
   const useBox = cam_itemBox(item);
   const boxLabel = useBox ? ('箱: ' + useBox) : '箱なし';
-  if (!confirm('登録しますか？\n' + cam_dispNo(sel) + ' ' + sel.name + '\n' + qty + '個 ／ ' + boxLabel)) return;
+  if (!await cam_confirm('登録しますか？\n' + cam_dispNo(sel) + ' ' + sel.name + '\n' + qty + '個 ／ ' + boxLabel, '登録する')) return;
   camDoRegister(id, sel, qty, false);
 }
 // ★ 第20段階相当: 登録の実処理。サーバーが箱のZ番号の確認（zConfirm）を返したら
@@ -1104,13 +1134,13 @@ function camDoRegister(id, sel, qty, forceZ) {
   item.status = 'registering';
   item.regError = '';
   renderCamCard(id);
-  camApi('register', { sheetName: sel.sheetName, rowIndex: sel.rowIndex, addQty: qty, box: cam_itemBox(item), orderKey: sel.orderKey || null, forceZ: forceZ }).then(function(data) {
+  camApi('register', { sheetName: sel.sheetName, rowIndex: sel.rowIndex, addQty: qty, box: cam_itemBox(item), orderKey: sel.orderKey || null, forceZ: forceZ }).then(async function(data) {
     if (data && data.zConfirm) {
       const zc = data.zConfirm;
       item.status = 'done';
       item.expanded = true;
       renderCamCard(id);
-      if (confirm('この箱には ' + zc.boxZNos.join('、') + ' の物が入っています。\n' + zc.itemZNo + ' の物を同じ箱に登録しますか？')) {
+      if (await cam_confirm('この箱には ' + zc.boxZNos.join('、') + ' の物が入っています。\n' + zc.itemZNo + ' の物を同じ箱に登録しますか？', '登録する')) {
         camDoRegister(id, sel, qty, true);
       } else {
         item.regError = '登録をやめました（箱のZ番号が違います）。';
@@ -1143,13 +1173,13 @@ function camDoRegister(id, sel, qty, forceZ) {
     cam_fallbackCapture(item);
   });
 }
-function camCancel(id) {
+async function camCancel(id) {
   const item = camFind(id);
   if (!item || !item.results.length || item.status === 'registering') return;
   const sel = item.results[item.selIndex] || item.results[0];
   const qtyEl = document.getElementById('cam-cancel-qty-' + id);
   const cancelVal = qtyEl ? qtyEl.value : 'ALL_CANCEL';
-  if (!confirm('取り消しますか？\n' + cam_dispNo(sel) + ' ' + sel.name + '\n取消: ' + cancelVal)) return;
+  if (!await cam_confirm('取り消しますか？\n' + cam_dispNo(sel) + ' ' + sel.name + '\n取消: ' + cancelVal, '取り消す')) return;
   item.status = 'registering';
   item.regError = '';
   renderCamCard(id);
@@ -1268,7 +1298,11 @@ const video = document.getElementById('cam');
 const logEl = document.getElementById('log');
 const shutterBtn = document.getElementById('shutterBtn');
 
-function setLog(t) { logEl.innerText = t; }
+function setLog(t) { logEl.textContent = t; }
+// 画面復帰時に映像の再生を蹴り直す（保険）。
+document.addEventListener('visibilitychange', function() {
+  if (!document.hidden && video && video.srcObject) { video.play().catch(function() {}); }
+});
 function showErr(msg) {
   const box = document.getElementById('errBox');
   box.style.display = 'block';
