@@ -1122,26 +1122,45 @@ async function camRegister(id) {
   const useBox = cam_itemBox(item);
   const boxLabel = useBox ? ('箱: ' + useBox) : '箱なし';
   if (!await cam_confirm('登録しますか？\n' + cam_dispNo(sel) + ' ' + sel.name + '\n' + qty + '個 ／ ' + boxLabel, '登録する')) return;
-  camDoRegister(id, sel, qty, false);
+  camDoRegister(id, sel, qty, false, false);
 }
 // ★ 第20段階相当: 登録の実処理。サーバーが箱のZ番号の確認（zConfirm）を返したら
 // ポップアップで確認し、OKなら forceZ=true で再送する。キャンセルなら登録しない。
+// ★ 箱の台帳チェック: サーバーが未登録箱の確認（boxAddConfirm）を返したら、
+// 2つのポップアップで確認し、両方OKなら forceBoxAdd=true で再送する
+// （サーバー側で箱番号管理表に備考明記のうえ追記されてから登録される）。
 // 直接通信に失敗したときは従来通り postMessage 経由へフォールバックする
 // （フォールバック先ではZ確認はアプリ側キューで案内される）。
-function camDoRegister(id, sel, qty, forceZ) {
+function camDoRegister(id, sel, qty, forceZ, forceBoxAdd) {
   const item = camFind(id);
   if (!item) return;
   item.status = 'registering';
   item.regError = '';
   renderCamCard(id);
-  camApi('register', { sheetName: sel.sheetName, rowIndex: sel.rowIndex, addQty: qty, box: cam_itemBox(item), orderKey: sel.orderKey || null, forceZ: forceZ }).then(async function(data) {
+  camApi('register', { sheetName: sel.sheetName, rowIndex: sel.rowIndex, addQty: qty, box: cam_itemBox(item), orderKey: sel.orderKey || null, forceZ: forceZ, forceBoxAdd: !!forceBoxAdd }).then(async function(data) {
+    if (data && data.boxAddConfirm) {
+      const bx = data.boxAddConfirm.box;
+      item.status = 'done';
+      item.expanded = true;
+      renderCamCard(id);
+      const step1 = await cam_confirm('この箱（' + bx + '）は箱番号管理表に登録されていません。', '次へ');
+      const step2 = step1 && await cam_confirm('箱番号管理表に「' + bx + '」を追加して、このまま登録しますか？', '追加して登録');
+      if (step2) {
+        camDoRegister(id, sel, qty, forceZ, true);
+      } else {
+        item.regError = '登録をやめました（箱が管理表に未登録です）。';
+        renderCamCard(id);
+        setLog('登録をやめました。');
+      }
+      return;
+    }
     if (data && data.zConfirm) {
       const zc = data.zConfirm;
       item.status = 'done';
       item.expanded = true;
       renderCamCard(id);
       if (await cam_confirm('この箱には ' + zc.boxZNos.join('、') + ' の物が入っています。\n' + zc.itemZNo + ' の物を同じ箱に登録しますか？', '登録する')) {
-        camDoRegister(id, sel, qty, true);
+        camDoRegister(id, sel, qty, true, forceBoxAdd);
       } else {
         item.regError = '登録をやめました（箱のZ番号が違います）。';
         renderCamCard(id);
