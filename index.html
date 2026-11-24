@@ -178,6 +178,41 @@ const ST11_OCR_TIMEOUT_MS = 20000;
 function camEsc(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
+// 動作状況欄に出す読み取り文字を、20文字×2行分（40文字）で切り上げる（続きは … で示す）。
+function cam_logClip(s) {
+  const t = String(s == null ? '' : s);
+  return t.length > 40 ? t.slice(0, 40) + '…' : t;
+}
+// 検索結果の行から Z番号を取り出す（組み合わせ番号の先頭、またはユニット№から）。
+function cam_zNoOf(r) {
+  if (!r) return '';
+  const head = String(r.number || '').trim().split('-')[0];
+  if (/^Z\d+$/i.test(head)) return head.toUpperCase();
+  const u = String(r.unitNo || '').trim().replace(/0+$/, '');
+  if (/^Z\d+$/i.test(u)) return u.toUpperCase();
+  return '';
+}
+// 写真カード用: 選択中の候補のZ番号から行き先（箱番号管理表の対応）を引いて、
+// カードの箱の初期値にする。候補を切り替えたときも呼び直す。
+async function cam_refreshDest(item) {
+  if (!item || item.source === 'qr' || item.directFailed || !item.results || !item.results.length) return;
+  const sel = item.results[item.selIndex] || item.results[0];
+  const zNo = cam_zNoOf(sel);
+  const sheet = (sel && sel.sheetName) || getTargetSheet();
+  if (!zNo || !sheet) return;
+  const key = sheet + '|' + zNo;
+  if (item.destKey === key) return;
+  item.destKey = key;
+  try {
+    const data = await camApi('boxdest', { seiban: sheet, zNo: zNo });
+    item.dest = data.dest || null;
+    if (!item.boxTouched) item.boxChoice = (item.dest && item.dest.box) ? item.dest.box : currentBox;
+    const summaryEl = document.getElementById('cam-summary-' + item.id);
+    if (summaryEl) summaryEl.outerHTML = camSummaryHtml(item);
+    const bodyEl = document.getElementById('cam-detail-body-' + item.id);
+    if (bodyEl && item.expanded) bodyEl.innerHTML = camDetailBodyHtml(item);
+  } catch (e) { /* 行き先が引けないときは今の箱のまま */ }
+}
 // エラーの中身を短く表示するための整形（2026-11-20: 汎用メッセージで握りつぶさない）。
 function cam_errDetail(err) {
   if (!err) return '不明なエラー';
@@ -458,7 +493,9 @@ function cam_applySearchResult(item, results, queryText) {
   item.selIndex = 0;
   item.status = item.results.length ? 'done' : 'nohit';
   if (!item.results.length) item.error = '該当なし';
+  if (item.source !== 'qr' && item.results.length && item.boxChoice === undefined) item.boxChoice = currentBox;
   renderCamCard(item.id);
+  if (item.source !== 'qr') cam_refreshDest(item);
 }
 // 直接通信で検索する。失敗時は postMessage 経由（GAS タブ）へフォールバックする。
 async function cam_processShot(item) {
@@ -486,7 +523,7 @@ async function cam_processShot(item) {
   try {
     const data = await camApi('search', { query: parsed.query, targetSheet: targetSheet, targetBox: '', targetZNo: '' });
     cam_applySearchResult(item, data.results || [], item.text);
-    setLog('⚡ OCR抽出(' + (ocr.secs || '?') + '秒): ' + ocr.text);
+    setLog('⚡ OCR抽出(' + (ocr.secs || '?') + '秒): ' + cam_logClip(ocr.text));
   } catch (err) {
     item.directFailed = true;
     setLog('直接通信に失敗したため元のアプリ経由で処理しています（' + cam_errDetail(err) + '）。');
@@ -503,7 +540,7 @@ function cam_addQrItem(text) {
   };
   camQueueItems.push(item);
   renderCamCard(id);
-  setLog('QRで部品を読み取りました: ' + text);
+  setLog('QRで部品を読み取りました: ' + cam_logClip(text));
   cam_processQrItem(item);
 }
 // 部品QRの確定形式（キー:値のカンマ区切り）を分解する。形式外なら null。
@@ -541,7 +578,7 @@ async function cam_processQrItem(item) {
     try {
       const data = await camApi('search', { query: parsed.query, targetSheet: targetSheet0, targetBox: '', targetZNo: '' });
       cam_applySearchResult(item, data.results || [], item.text);
-      setLog('⚡ QR検索: ' + item.text);
+      setLog('⚡ QR検索: ' + cam_logClip(item.text));
     } catch (err) {
       item.status = 'failed';
       item.error = '直接通信に失敗しました（' + cam_errDetail(err) + '）。通信状況を確認して、もう一度QRを映してください。';
@@ -693,7 +730,7 @@ function qrHandleValue(raw) {
   hideQrButton();
   // 直近5件のキューに同じ読み取り文字があれば、探す手間になるので追加しない。
   if (cam_recentQueueHas(parsed.text)) {
-    setLog('直近のキューに同じものがあるため追加しません: ' + parsed.text);
+    setLog('直近のキューに同じものがあるため追加しません: ' + cam_logClip(parsed.text));
     return;
   }
   cam_addQrItem(parsed.text);
@@ -858,7 +895,7 @@ function cam_itemBox(item) {
   if (item && item.boxChoice !== undefined && item.boxChoice !== null) return item.boxChoice;
   return currentBox;
 }
-function camSetBoxChoice(id, v) { const it = camFind(id); if (it) it.boxChoice = v; }
+function camSetBoxChoice(id, v) { const it = camFind(id); if (it) { it.boxChoice = v; it.boxTouched = true; } }
 function camFind(id) {
   return camQueueItems.find(function(q) { return q.id === id; });
 }
@@ -926,7 +963,7 @@ function camDetailBodyHtml(item) {
     }
   }
   let boxRowHtml = '';
-  if (item.source === 'qr' && item.results.length) {
+  if (item.results.length) {
     const opts = [];
     const seenB = {};
     function addOpt(v, label) { if (v && !seenB[v]) { seenB[v] = true; opts.push({ v: v, label: label }); } }
@@ -1034,9 +1071,11 @@ function camSelectCandidate(id, idx) {
     const top = (item.status === 'done' || item.status === 'registered') && item.results.length ? (item.results[item.selIndex] || item.results[0]) : null;
     if (top && top.shogo === '対象外') { cardEl.style.opacity = '0.55'; cardEl.style.background = '#eceff1'; }
     else { cardEl.style.opacity = ''; cardEl.style.background = ''; }
+    cam_refreshDest(item);
     return;
   }
   renderCamCard(id);
+  cam_refreshDest(item);
 }
 function camDelete(id) {
   camQueueItems = camQueueItems.filter(function(q) { return q.id !== id; });
