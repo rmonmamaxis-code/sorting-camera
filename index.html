@@ -157,6 +157,9 @@
 // origin は固定値ではなく受信したメッセージの event.origin から学ぶ。
 // 親ページのドメイン文字列はページ内に置かない（公開時の外部連携検出を避けるため）。
 // GAS からのメッセージは iframe の origin（*.googleusercontent.com）で届く。
+// ★ 箱QR専用モード（2026-11-26）: GAS画面の箱の登録部の「QRで箱を登録」から ?boxqr=1 で
+// 開かれる。箱のQRを読んだら箱を設定して自動で画面を閉じる（撮影キューは使わない）。
+const CAM_BOXQR_MODE = new URLSearchParams(location.search).get('boxqr') === '1';
 let gasOrigin = null;
 let gasAlive = false;
 let helloTries = 0;
@@ -736,8 +739,23 @@ function qrHandleValue(raw) {
   qrMissCount = 0;
   if (parsed.type === 'box') {
     lastQrValue = String(raw || '').trim();
+    if (CAM_BOXQR_MODE) {
+      // 箱QR専用モード: タップ待ちにせず、その場で設定して画面を閉じる。
+      setBoxBadge(parsed.box);
+      postToGas({ type: 'set-box', box: parsed.box });
+      setLog('箱「' + parsed.box + '」を登録しました。画面を閉じます…');
+      setTimeout(camCloseSelf, 400);
+      return;
+    }
     if (parsed.box === currentBox) { hideQrButton(); return; }
     if (parsed.box !== qrButtonValue) showQrButton(parsed.box);
+    return;
+  }
+  if (CAM_BOXQR_MODE) {
+    if (parsed.text !== lastQrValue) {
+      lastQrValue = parsed.text;
+      setLog('これは箱のQRではありません。箱のQR（箱識別コード）を映してください。');
+    }
     return;
   }
   // 部品のQR: 同じQRを映し続けている間はキューに1回だけ入れる。
@@ -1464,6 +1482,29 @@ function showWarn(msg) {
   box.innerText = msg;
 }
 
+// 箱QR専用モード: カメラを止めてこの画面（タブ）を閉じる。
+// window.close() が効かない環境では案内を出して手動で閉じてもらう。
+function camCloseSelf() {
+  try { if (videoTrack) videoTrack.stop(); } catch (e) {}
+  try { if (video && video.srcObject) { video.srcObject.getTracks().forEach(function(t) { t.stop(); }); video.srcObject = null; } } catch (e) {}
+  try { window.close(); } catch (e) {}
+  setTimeout(function() {
+    setLog('箱を登録しました。この画面（タブ）を閉じて、元の画面に戻ってください。');
+  }, 600);
+}
+// 箱QR専用モードでは撮影キュー等のUIを隠し、箱QRの読み取りだけに絞る。
+function camApplyBoxQrMode() {
+  if (!CAM_BOXQR_MODE) return;
+  ['sheetRow', 'boxManual', 'shotCount', 'queueSection'].forEach(function(id) {
+    const el = document.getElementById(id);
+    if (el) el.style.display = 'none';
+  });
+  const shutter = document.getElementById('shutterBtn');
+  if (shutter && shutter.parentElement) shutter.parentElement.style.display = 'none';
+  const hint = document.querySelector('.hint');
+  if (hint) hint.style.display = 'none';
+}
+
 async function startCamera() {
   if (!window.opener) {
     showWarn('仕分けアプリから開いていません。検索・登録は直接通信で行います。直接つながらない場合は仕分けアプリの「連続撮影モード」ボタンから開き直してください。');
@@ -1491,7 +1532,7 @@ async function startCamera() {
       }
     } catch (e) { /* 対応していない端末では無視 */ }
     shutterBtn.disabled = false;
-    setLog('カメラ起動中です。枠の中にラベルを入れて「📷 撮影」を押してください。「箱識別コード」のQRを映すと箱を設定できます。部品のQRを映すとキューに入って検索します。');
+    setLog(CAM_BOXQR_MODE ? '箱のQR（箱識別コード）を映してください。読み取ると自動で登録して画面を閉じます。' : 'カメラ起動中です。枠の中にラベルを入れて「📷 撮影」を押してください。「箱識別コード」のQRを映すと箱を設定できます。部品のQRを映すとキューに入って検索します。');
     initQrDetector();
     sendHello();
   } catch (err) {
@@ -1507,6 +1548,7 @@ async function startCamera() {
 }
 
 function takeShot() {
+  if (CAM_BOXQR_MODE) return;
   if (!video.videoWidth) { setLog('カメラの準備中です。少し待って撮影してください。'); return; }
   flashCam();
   const canvas = document.createElement('canvas');
@@ -1569,6 +1611,7 @@ document.getElementById('closeBtn').addEventListener('click', function() {
   try { window.close(); } catch (e) {}
 });
 
+camApplyBoxQrMode();
 startCamera();
 </script>
 </body>
