@@ -1143,10 +1143,9 @@ function camSelectCandidate(id, idx) {
   const item = camFind(id);
   if (!item) return;
   item.selIndex = Number(idx) || 0;
-  item.showCands = false;
-  item.showAllCands = false;
   // 候補の切り替えではカード全体を作り直さない。要約と詳細本体だけを差し替え、
-  // 候補リストは閉じる（全体を作り直すとスクロール位置が飛ぶため）。
+  // 候補リストは開いたままにする（2026-11-26: 連続して候補を選べるように。
+  // 全体を作り直すとスクロール位置が飛ぶため）。
   const summaryEl = document.getElementById('cam-summary-' + id);
   const bodyEl = document.getElementById('cam-detail-body-' + id);
   const cardEl = document.getElementById('cam-card-' + id);
@@ -1154,7 +1153,7 @@ function camSelectCandidate(id, idx) {
     summaryEl.outerHTML = camSummaryHtml(item);
     bodyEl.innerHTML = camDetailBodyHtml(item);
     const listEl = document.getElementById('cam-candlist-' + id);
-    if (listEl) listEl.innerHTML = '';
+    if (listEl) listEl.innerHTML = camCandListHtml(item);
     const btnEl = document.getElementById('cam-candbtn-' + id);
     if (btnEl) btnEl.textContent = camCandToggleLabel(item);
     const top = (item.status === 'done' || item.status === 'registered') && item.results.length ? (item.results[item.selIndex] || item.results[0]) : null;
