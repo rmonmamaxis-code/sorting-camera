@@ -234,13 +234,14 @@ async function cam_refreshDest(item) {
   const zNo = cam_zNoOf(sel);
   const sheet = (sel && sel.sheetName) || getTargetSheet();
   if (!zNo || !sheet) return;
-  const key = sheet + '|' + zNo;
+  const key = sheet + '|' + zNo + '|' + (sel.number || '');
   if (item.destKey === key) return;
   item.destKey = key;
   try {
-    const data = await camApi('boxdest', { seiban: sheet, zNo: zNo });
+    const data = await camApi('boxdest', { seiban: sheet, zNo: zNo, number: sel.number || '' });
     item.dest = data.dest || null;
-    if (!item.boxTouched) item.boxChoice = (item.dest && item.dest.box) ? item.dest.box : currentBox;
+    // ★ 設定中の箱があればそれを優先する（2026-11-26）。無ければ行き先（部品単位→Z単位）。
+    if (!item.boxTouched) item.boxChoice = currentBox ? currentBox : ((item.dest && item.dest.box) ? item.dest.box : '');
     const summaryEl = document.getElementById('cam-summary-' + item.id);
     if (summaryEl) summaryEl.outerHTML = camSummaryHtml(item);
     const bodyEl = document.getElementById('cam-detail-body-' + item.id);
@@ -686,7 +687,8 @@ async function cam_processQrItem(item) {
     const others = data.others || [];
     if (matches.length) {
       item.dest = data.dest || null;
-      item.boxChoice = (item.dest && item.dest.box) ? item.dest.box : currentBox;
+      // ★ 設定中の箱があればそれを優先する（2026-11-26）。
+      item.boxChoice = currentBox ? currentBox : ((item.dest && item.dest.box) ? item.dest.box : '');
       cam_applySearchResult(item, matches, item.text);
       setLog('⚡ QR完全一致: 図番 ' + pq.drawingNo + (item.qrSeibanMismatch ? '（製番違い: QRの製番は ' + pq.seiban + '）' : ''));
     } else if (others.length) {
@@ -1144,7 +1146,7 @@ function camDetailBodyHtml(item) {
     const opts = [];
     const seenB = {};
     function addOpt(v, label) { if (v && !seenB[v]) { seenB[v] = true; opts.push({ v: v, label: label }); } }
-    if (item.dest && item.dest.box) addOpt(item.dest.box, item.dest.box + '（' + camEsc(item.dest.zNo) + 'の行き先）');
+    if (item.dest && item.dest.box) addOpt(item.dest.box, item.dest.box + '（' + camEsc(item.dest.source === 'part' ? (item.dest.partNo || item.dest.zNo) : item.dest.zNo) + 'の行き先）');
     ((item.dest && item.dest.linkedBoxes) || []).forEach(function(b) { addOpt(b, b + '（このZと紐付いている箱）'); });
     ((item.dest && item.dest.boxesWithZ) || []).forEach(function(b) { addOpt(b, b + '（このZが入っている箱）'); });
     addOpt(currentBox, currentBox + '（今設定中の箱）');
@@ -1160,8 +1162,12 @@ function camDetailBodyHtml(item) {
   // ★ 紐付き箱の表示（2026-11-26）: そのZと紐付いている箱（新しい順）。行き先取得後に表示される。
   let linkedHtml = '';
   if (item.dest) {
-    const lb = item.dest.linkedBoxes || [];
-    linkedHtml = '<div style="font-size:13px; color:#5e35b1; margin-top:4px;">🔗 紐付き箱' + (item.dest.zNo ? '（' + camEsc(item.dest.zNo) + '）' : '') + ': ' + (lb.length ? lb.map(function(b) { return camEsc(b); }).join(', ') : 'なし') + '</div>';
+    if (item.dest.source === 'part' && item.dest.box) {
+      linkedHtml = '<div style="font-size:13px; color:#5e35b1; margin-top:4px;">🔗 紐付き箱（' + camEsc(item.dest.partNo || '') + '）: ' + camEsc(item.dest.box) + '</div>';
+    } else {
+      const lb = item.dest.linkedBoxes || [];
+      linkedHtml = '<div style="font-size:13px; color:#5e35b1; margin-top:4px;">🔗 紐付き箱' + (item.dest.zNo ? '（' + camEsc(item.dest.zNo) + '）' : '') + ': ' + (lb.length ? lb.map(function(b) { return camEsc(b); }).join(', ') : 'なし') + '</div>';
+    }
   }
   return qrBannerHtml + shogoBadgeHtml + zNoteHtml + boxRowHtml + '<div class="q-title">' + cam_dispNo(sel) + '</div>' + extraHtml + modelHtml
     + '<div style="font-size:14px; margin-top:4px;">品名: ' + sel.name + '</div>'
