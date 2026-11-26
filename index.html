@@ -551,7 +551,7 @@ function cam_addQrItem(text) {
   const id = 'c' + (camNextId++);
   const item = {
     id: id, thumb: '', text: text, source: 'qr', image: '',
-    status: 'searching', error: '', results: [], selIndex: 0, expanded: true, showOcrText: false, showCands: false, showAllCands: false,
+    status: 'searching', error: '', results: [], selIndex: 0, expanded: true, showOcrText: false, showCands: false, showAllCands: false, candRegIdx: -1,
     detectedQty: null, regError: '', pendingOp: null, directFailed: false, watchdog: null
   };
   camQueueItems.push(item);
@@ -985,9 +985,10 @@ function camDetailBodyHtml(item) {
   if (sel.isComplete) {
     btnHtml = '<div style="font-weight:bold; color:#2e7d32; margin-bottom:5px;">✅ チェック完了 (' + sel.checkCount + ' / ' + sel.orderCount + ' 個)</div>' + cancelHtml;
   } else {
+    const regBusy = item.status === 'registering';
     btnHtml = '<div style="font-weight:bold; color:#1565c0; margin-bottom:5px;">⏳ 未完了 (' + sel.checkCount + ' / ' + sel.orderCount + ' 個)</div>'
-      + '<div class="q-row"><select id="cam-add-qty-' + item.id + '" style="width:120px; flex:none; background-color:#f1f6fb;">' + cam_qtyOptions(sel, item.detectedQty) + '</select>'
-      + '<button class="q-btn" onclick="camRegister(\'' + item.id + '\')">登録</button></div>' + cancelHtml;
+      + '<div class="q-row"><select id="cam-add-qty-' + item.id + '" style="width:120px; flex:none; background-color:#f1f6fb;"' + (regBusy ? ' disabled' : '') + '>' + cam_qtyOptions(sel, item.detectedQty) + '</select>'
+      + '<button class="q-btn" onclick="camRegister(\'' + item.id + '\')"' + (regBusy ? ' disabled' : '') + '>' + (regBusy ? '登録中…' : '登録') + '</button></div>' + cancelHtml;
   }
   const shogoBadgeHtml = sel.shogo === '対象外' ? '<div style="font-size:13px; color:#fff; background:#78909c; font-weight:bold; padding:4px 8px; border-radius:4px; margin-bottom:5px; display:inline-block;">対象外・消込済</div>' : '';
   let qrBannerHtml = '';
@@ -1035,10 +1036,16 @@ function camCandListHtml(item) {
     const selCls = i === item.selIndex ? ' selected' : '';
     const scoreTxt = item.qr ? '完全一致' : (r.score + '点');
     const modelTxt = r.displayModel || r.model || '';
+    const candBusy = item.candRegIdx === i;
+    const candCtrl = r.isComplete
+      ? '<span style="font-size:13px; font-weight:bold; color:#2e7d32;">✅ チェック完了</span>'
+      : '<select id="cam-cand-qty-' + item.id + '-' + i + '" style="width:110px; flex:none; background-color:#f1f6fb;"' + (candBusy ? ' disabled' : '') + '>' + cam_qtyOptions(r, i === item.selIndex ? item.detectedQty : null) + '</select>'
+        + '<button class="q-btn" onclick="camRegisterCandidate(\'' + item.id + '\', ' + i + ')"' + (candBusy ? ' disabled' : '') + '>' + (candBusy ? '登録中…' : '登録') + '</button>';
     html += '<div class="q-cand-row' + selCls + '" onclick="camSelectCandidate(\'' + item.id + '\', ' + i + ')">'
       + '<span class="cand-no">' + cam_dispNo(r) + '</span>'
       + ' <span style="font-size:12px; color:#607d8b;">' + (i + 1) + '位 ／ ' + scoreTxt + ' ／ ' + r.checkCount + ' / ' + r.orderCount + ' 個' + (r.shogo === '対象外' ? ' ／ 対象外・消込済' : '') + '</span>'
       + '<div class="cand-sub">' + (modelTxt ? '型式: ' + camEsc(modelTxt) + ' ／ ' : '') + '品名: ' + camEsc(r.name || '') + '</div>'
+      + '<div class="q-row" onclick="event.stopPropagation()">' + candCtrl + '</div>'
       + '</div>';
   });
   if (!item.showAllCands && item.results.length > LIMIT) {
@@ -1087,7 +1094,7 @@ function renderCamCard(id) {
     + '<button class="q-del" onclick="event.stopPropagation(); camDelete(\'' + item.id + '\')" title="この撮影を削除">×</button></div>';
   let summaryHtml = camSummaryHtml(item);
   let detailHtml = '';
-  if (item.expanded && (item.status === 'done' || item.status === 'registered') && item.results.length) {
+  if (item.expanded && (item.status === 'done' || item.status === 'registered' || item.status === 'registering') && item.results.length) {
     detailHtml = '<div class="q-detail">'
       + '<div id="cam-detail-body-' + item.id + '">' + camDetailBodyHtml(item) + '</div>'
       + (item.results.length >= 2
@@ -1168,6 +1175,7 @@ function camDelete(id) {
 async function camRegister(id) {
   const item = camFind(id);
   if (!item || !item.results.length || item.status === 'registering') return;
+  if (item.candRegIdx === item.selIndex) return;
   const sel = item.results[item.selIndex] || item.results[0];
   const qtyEl = document.getElementById('cam-add-qty-' + id);
   const qty = qtyEl ? qtyEl.value : '1';
@@ -1227,7 +1235,6 @@ function camDoRegister(id, sel, qty, forceZ, forceBoxAdd) {
     if (data.rowIndex) sel.rowIndex = data.rowIndex;
     sel.isComplete = sel.checkCount >= sel.orderCount;
     item.status = 'registered';
-    item.expanded = false;
     item.regError = '';
     renderCamCard(id);
     setLog('登録しました。');
@@ -1242,6 +1249,79 @@ function camDoRegister(id, sel, qty, forceZ, forceBoxAdd) {
     item.pendingOp = { type: 'register', qty: String(qty) };
     setLog('直接通信に失敗したため元のアプリ経由で処理しています（' + cam_errDetail(err) + '）。');
     cam_fallbackCapture(item);
+  });
+}
+// ★ 候補行からの直接登録（2026-11-26）: 候補リストの各行の数量＋登録ボタンで、その候補
+// （シートの行）をそのまま登録する。リストは開いたままにし、連続して登録できる。
+// 直接通信に失敗したときはフォールバックせずエラー表示（フォールバックは選択中候補を
+// 登録してしまうため、行指定の登録には使わない）。
+async function camRegisterCandidate(id, idx) {
+  const item = camFind(id);
+  if (!item || !item.results[idx]) return;
+  if (item.status === 'registering' || item.candRegIdx === idx) return;
+  const r = item.results[idx];
+  const qtyEl = document.getElementById('cam-cand-qty-' + id + '-' + idx);
+  const qty = qtyEl ? qtyEl.value : '1';
+  const useBox = cam_itemBox(item);
+  const boxLabel = useBox ? ('箱: ' + useBox) : '箱なし';
+  if (!await cam_confirm('登録しますか？\n' + cam_dispNo(r) + ' ' + r.name + '\n' + qty + '個 ／ ' + boxLabel, '登録する')) return;
+  camDoRegisterCandidate(id, idx, qty, false, false);
+}
+function camDoRegisterCandidate(id, idx, qty, forceZ, forceBoxAdd) {
+  const item = camFind(id);
+  if (!item || !item.results[idx]) return;
+  const r = item.results[idx];
+  item.candRegIdx = idx;
+  item.regError = '';
+  const listEl0 = document.getElementById('cam-candlist-' + id);
+  if (listEl0) listEl0.innerHTML = camCandListHtml(item);
+  camApi('register', { sheetName: r.sheetName, rowIndex: r.rowIndex, addQty: qty, box: cam_itemBox(item), orderKey: r.orderKey || null, forceZ: forceZ, forceBoxAdd: !!forceBoxAdd }).then(async function(data) {
+    if (data && data.boxAddConfirm) {
+      const bx = data.boxAddConfirm.box;
+      item.candRegIdx = -1;
+      const listEl1 = document.getElementById('cam-candlist-' + id);
+      if (listEl1) listEl1.innerHTML = camCandListHtml(item);
+      const step1 = await cam_confirm('この箱（' + bx + '）は箱番号管理表に登録されていません。', '次へ');
+      const step2 = step1 && await cam_confirm('箱番号管理表に「' + bx + '」を追加して、このまま登録しますか？', '追加して登録');
+      if (step2) { camDoRegisterCandidate(id, idx, qty, forceZ, true); }
+      else { item.regError = '登録をやめました（箱が管理表に未登録です）。'; renderCamCard(id); setLog('登録をやめました。'); }
+      return;
+    }
+    if (data && data.zConfirm) {
+      const zc = data.zConfirm;
+      item.candRegIdx = -1;
+      const listEl2 = document.getElementById('cam-candlist-' + id);
+      if (listEl2) listEl2.innerHTML = camCandListHtml(item);
+      if (await cam_confirm('この箱には ' + zc.boxZNos.join('、') + ' の物が入っています。\n' + zc.itemZNo + ' の物を同じ箱に登録しますか？', '登録する')) {
+        camDoRegisterCandidate(id, idx, qty, true, forceBoxAdd);
+      } else {
+        item.regError = '登録をやめました（箱のZ番号が違います）。';
+        renderCamCard(id);
+        setLog('登録をやめました。');
+      }
+      return;
+    }
+    r.checkCount = data.checkCount;
+    r.orderCount = data.orderCount;
+    r.exportedCount = data.exportedCount;
+    r.boxInfo = data.boxInfo;
+    if (data.rowIndex) r.rowIndex = data.rowIndex;
+    r.isComplete = r.checkCount >= r.orderCount;
+    item.candRegIdx = -1;
+    const listEl = document.getElementById('cam-candlist-' + id);
+    if (listEl) listEl.innerHTML = camCandListHtml(item);
+    if (idx === item.selIndex) {
+      const summaryEl = document.getElementById('cam-summary-' + id);
+      const bodyEl = document.getElementById('cam-detail-body-' + id);
+      if (summaryEl) summaryEl.outerHTML = camSummaryHtml(item);
+      if (bodyEl) bodyEl.innerHTML = camDetailBodyHtml(item);
+    }
+    setLog('登録しました。');
+  }).catch(function(err) {
+    item.candRegIdx = -1;
+    item.regError = '直接通信に失敗しました（' + cam_errDetail(err) + '）。もう一度登録してください。';
+    renderCamCard(id);
+    setLog('直接通信に失敗しました（' + cam_errDetail(err) + '）。');
   });
 }
 async function camCancel(id) {
@@ -1308,9 +1388,9 @@ window.addEventListener('message', function(event) {
         item.status = 'registering';
         renderCamCard(item.id);
         if (op.type === 'register') {
-          postToGas({ type: 'register', queueId: item.id, selIndex: item.selIndex, qty: op.qty });
+          postToGas({ type: 'register', queueId: item.id, selIndex: item.selIndex, qty: op.qty, box: cam_itemBox(item) });
         } else {
-          postToGas({ type: 'cancel', queueId: item.id, selIndex: item.selIndex, cancelVal: op.cancelVal });
+          postToGas({ type: 'cancel', queueId: item.id, selIndex: item.selIndex, cancelVal: op.cancelVal, box: cam_itemBox(item) });
         }
         return;
       }
@@ -1344,7 +1424,7 @@ window.addEventListener('message', function(event) {
       sel.isComplete = sel.checkCount >= sel.orderCount;
     }
     item.status = (d.type === 'registered') ? 'registered' : 'done';
-    item.expanded = false;
+    if (d.type !== 'registered') item.expanded = false;
     item.regError = '';
     renderCamCard(item.id);
     setLog(d.type === 'registered' ? '登録しました。' : '取り消しました。');
@@ -1447,7 +1527,7 @@ function takeShot() {
   const id = 'c' + (camNextId++);
   const item = {
     id: id, thumb: thumbUrl, text: '', source: 'camera', image: dataUrl,
-    status: 'searching', error: '', results: [], selIndex: 0, expanded: false, showOcrText: false, showCands: false, showAllCands: false,
+    status: 'searching', error: '', results: [], selIndex: 0, expanded: false, showOcrText: false, showCands: false, showAllCands: false, candRegIdx: -1,
     detectedQty: null, regError: '', pendingOp: null, directFailed: false, watchdog: null
   };
   camQueueItems.push(item);
