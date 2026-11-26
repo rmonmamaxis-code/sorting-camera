@@ -1368,15 +1368,13 @@ function camDoRegisterCandidate(id, idx, qty, forceZ, forceBoxAdd) {
 // ★ 箱変更（2026-11-26）: 登録済みの数量について、カードの箱選択が取消ドロップダウンの
 // 箱と違うときは取消ボタンを「箱変更」ボタンに変える。押すとチェック数は変えずに
 // その数量を指定の箱へ移す。ALL_CANCEL は「全体」として扱い、箱が選ばれていれば
-// 全量移動（ただし既に全量がその箱にあるときは移動が無意味なので取消のまま）。
+// 常に全量移動の「箱変更」にする（2026-11-26: 全量が既にその箱にあっても出す。
+// 全体取消は箱なしを選んだとき）。
 function camCancelModeFor(item, cancelVal) {
   const sel = item.results[item.selIndex] || item.results[0];
   const toBox = cam_itemBox(item);
   if (cancelVal === 'ALL_CANCEL') {
     if (!toBox) return { mode: 'cancel' };
-    const bObj = cam_parseBoxInfo((sel && sel.boxInfo) || '');
-    const cancelable = sel ? (sel.checkCount - sel.exportedCount) : 0;
-    if (cancelable > 0 && (bObj[toBox] || 0) >= cancelable) return { mode: 'cancel' };
     return { mode: 'move', all: true, qty: 0, fromBox: '*', toBox: toBox };
   }
   const parts = String(cancelVal || '').split('|');
