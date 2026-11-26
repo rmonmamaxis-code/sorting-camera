@@ -1221,7 +1221,8 @@ function renderCamCard(id) {
     el = document.createElement('div');
     el.className = 'card';
     el.id = 'cam-card-' + id;
-    area.appendChild(el);
+    // ★ 新しいカードを一番上に積む（2026-11-26）: キューが溜まってもスクロールが増えない。
+    area.insertBefore(el, area.firstChild);
   }
   el.classList.toggle('registered', item.status === 'registered');
   const statusClass = (item.status === 'done' || item.status === 'registered') ? 'st-done'
