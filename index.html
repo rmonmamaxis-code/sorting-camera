@@ -21,7 +21,7 @@
          QRが画角から外れてから映し直せば再読み取りできる。
      2026-11-17 最新化（5.0.1 側 Stage 19/20 相当を反映）:
        - 製番（対象シート）プルダウンを追加。サーバーからシート名を取り、手入力で絞り込みできる。
-         既定は A200001UR（保存済みの製番が無くなっていたら A200001UR、無ければ先頭のシート）。
+         既定の製番は無い（2026-11-26 撤廃）。初回は空欄で、未設定ならポップアップで設定を促す。前回選んだ製番は localStorage から復元する。
          検索は必ずここで選んだ製番に対して送る（空のまま送らない）。
        - 表示する番号はユニットNoのみ（cam_dispNo）。照合が「対象外」の行はグレーアウト＋バッジ表示。
        - 箱のZ番号チェック: 登録時にサーバーが確認（zConfirm）を返したらポップアップで確認し、
@@ -261,11 +261,12 @@ async function camApi(action, body) {
 // サーバーから今あるシート名を取ってプルダウンに出す。手入力すると
 // 入力文字を含むシートだけに絞り込む（部分一致・大文字小文字を区別しない）。
 // 検索は必ずここで選んだ製番タブに対して行う。空のまま検索は送らない。
-// 保存済みの製番がもう存在しない場合（タブ削除など）は A200001UR、
-// 無ければ先頭のシートを既定にする。変更は localStorage に保存する。
+// 既定の製番は無い（2026-11-26 撤廃）。本当の初回（保存なし）は空欄のままにし、
+// 勝手に製番を入れない。未設定のときはポップアップで設定を促す。
+// 前回選んだ製番は localStorage から復元する。保存済みの製番タブが
+// 無くなっていたら空欄に戻して設定を促す（別の製番を勝手に選ばない）。
 // 通信に失敗したら手入力のまま（保存済みの値か空欄）使う。
 const SHEET_KEY = 'verx_targetSheet_v1';
-const SHEET_DEFAULT = 'A200001UR';
 let camSheetCandidates = [];
 function camSheetMatches(name, q) {
   if (!q) return true;
@@ -326,6 +327,22 @@ function getTargetSheet() {
   const el = document.getElementById('sheetInput');
   return el ? el.value.trim() : '';
 }
+// 製番が未設定のときに設定を促すポップアップ（2026-11-26）。
+// 「設定する」で製番リストを開く。箱QR専用モードでは出さない。
+let camSheetPromptOpen = false;
+async function camPromptSheet() {
+  if (CAM_BOXQR_MODE || camSheetPromptOpen) return;
+  if (getTargetSheet()) return;
+  camSheetPromptOpen = true;
+  const ok = await cam_confirm('製番が設定されていません。\n上の製番欄から対象の製番を選んでください。', '設定する');
+  camSheetPromptOpen = false;
+  if (ok) {
+    const input = document.getElementById('sheetInput');
+    const list = document.getElementById('sheetInput_list');
+    if (list) { camRenderSheetList(); list.classList.add('show'); }
+    if (input) input.focus();
+  }
+}
 (function initSheetInput() {
   const el = document.getElementById('sheetInput');
   if (!el) return;
@@ -341,14 +358,16 @@ function getTargetSheet() {
     if (!names.length) return;
     camSheetCandidates = names.slice();
     const cur = el.value.trim();
-    if (!cur || names.indexOf(cur) === -1) {
-      const next = names.indexOf(SHEET_DEFAULT) !== -1 ? SHEET_DEFAULT : names[0];
-      el.value = next;
-      camSaveSheetInput();
+    if (cur && names.indexOf(cur) === -1) {
+      // 保存済みの製番タブが無くなっていたら空欄に戻す（別の製番を勝手に選ばない）
+      el.value = '';
+      try { localStorage.removeItem(SHEET_KEY); } catch (e) {}
     }
     camRenderSheetList();
+    camPromptSheet();
   }).catch(function() {
     // 通信に失敗したら手入力のまま（保存済みの値か空欄）使う
+    camPromptSheet();
   });
 })();
 // verx-index.html の verx_parseQuery と同一規則（数量抽出・全角正規化）。
@@ -536,6 +555,7 @@ async function cam_processShot(item) {
     item.status = 'failed';
     item.error = '製番（対象シート）が入力されていません。上の製番欄に入力してください。';
     renderCamCard(item.id);
+    camPromptSheet();
     return;
   }
   cam_armWatchdog(item, 30000);
@@ -591,6 +611,7 @@ async function cam_processQrItem(item) {
       item.status = 'failed';
       item.error = '製番（対象シート）が入力されていません。上の製番欄に入力してください。';
       renderCamCard(item.id);
+      camPromptSheet();
       return;
     }
     cam_armWatchdog(item, 60000);
