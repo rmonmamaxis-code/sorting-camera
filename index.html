@@ -86,6 +86,7 @@
   .q-row select { flex: 1; font-size: 15px; padding: 8px; }
   .q-btn { flex: 2; padding: 12px; font-size: 16px; font-weight: bold; border: none; border-radius: 6px; color: #fff; background: #2e7d32; cursor: pointer; }
   .q-btn.cancel { flex: 1; background: #c62828; }
+  .q-btn.move { flex: 1; background: #7e57c2; }
   .q-btn:disabled { background: #90a4ae; }
   .q-err { color: #c62828; font-size: 13px; font-weight: bold; margin-top: 6px; }
   /* ★ 第19段階: 製番プルダウン（入力で絞り込み） */
@@ -950,7 +951,7 @@ function cam_itemBox(item) {
   if (item && item.boxChoice !== undefined && item.boxChoice !== null) return item.boxChoice;
   return currentBox;
 }
-function camSetBoxChoice(id, v) { const it = camFind(id); if (it) { it.boxChoice = v; it.boxTouched = true; } }
+function camSetBoxChoice(id, v) { const it = camFind(id); if (it) { it.boxChoice = v; it.boxTouched = true; } camRefreshCancelBtn(id); }
 // 画面内の確認ダイアログ。ブラウザ標準の confirm() は Android Chrome で
 // カメラ映像の描画レイヤーを壊すことがあるため使わない（2026-11-24）。
 let camConfirmResolve = null;
@@ -1015,8 +1016,10 @@ function camDetailBodyHtml(item) {
   const cancelOptionsStr = cam_cancelOptions(sel);
   let cancelHtml = '';
   if (cancelOptionsStr) {
-    cancelHtml = '<div class="q-row"><select id="cam-cancel-qty-' + item.id + '">' + cancelOptionsStr + '</select>'
-      + '<button class="q-btn cancel" onclick="camCancel(\'' + item.id + '\')">取消</button></div>';
+    const cancelBusy = item.status === 'registering';
+    const initMode = camCancelModeFor(item, 'ALL_CANCEL');
+    cancelHtml = '<div class="q-row"><select id="cam-cancel-qty-' + item.id + '" onchange="camRefreshCancelBtn(\'' + item.id + '\')"' + (cancelBusy ? ' disabled' : '') + '>' + cancelOptionsStr + '</select>'
+      + '<button class="q-btn ' + (initMode.mode === 'move' ? 'move' : 'cancel') + '" id="cam-cancel-btn-' + item.id + '" onclick="camCancelOrMove(\'' + item.id + '\')"' + (cancelBusy ? ' disabled' : '') + '>' + (initMode.mode === 'move' ? '箱変更' : '取消') + '</button></div>';
   } else if (sel.checkCount > 0) {
     cancelHtml = '<div style="color:#c62828; font-size:12px; font-weight:bold; margin-top:5px; text-align:center;">※出力済のため取消不可</div>';
   }
@@ -1358,6 +1361,102 @@ function camDoRegisterCandidate(id, idx, qty, forceZ, forceBoxAdd) {
   }).catch(function(err) {
     item.candRegIdx = -1;
     item.regError = '直接通信に失敗しました（' + cam_errDetail(err) + '）。もう一度登録してください。';
+    renderCamCard(id);
+    setLog('直接通信に失敗しました（' + cam_errDetail(err) + '）。');
+  });
+}
+// ★ 箱変更（2026-11-26）: 登録済みの数量について、カードの箱選択が取消ドロップダウンの
+// 箱と違うときは取消ボタンを「箱変更」ボタンに変える。押すとチェック数は変えずに
+// その数量を指定の箱へ移す。ALL_CANCEL は「全体」として扱い、箱が選ばれていれば
+// 全量移動（ただし既に全量がその箱にあるときは移動が無意味なので取消のまま）。
+function camCancelModeFor(item, cancelVal) {
+  const sel = item.results[item.selIndex] || item.results[0];
+  const toBox = cam_itemBox(item);
+  if (cancelVal === 'ALL_CANCEL') {
+    if (!toBox) return { mode: 'cancel' };
+    const bObj = cam_parseBoxInfo((sel && sel.boxInfo) || '');
+    const cancelable = sel ? (sel.checkCount - sel.exportedCount) : 0;
+    if (cancelable > 0 && (bObj[toBox] || 0) >= cancelable) return { mode: 'cancel' };
+    return { mode: 'move', all: true, qty: 0, fromBox: '*', toBox: toBox };
+  }
+  const parts = String(cancelVal || '').split('|');
+  const qty = Math.abs(Number(parts[0]) || 0);
+  const fromBox = parts[1] || '';
+  if (toBox !== fromBox) return { mode: 'move', all: false, qty: qty, fromBox: fromBox, toBox: toBox };
+  return { mode: 'cancel' };
+}
+function camRefreshCancelBtn(id) {
+  const item = camFind(id);
+  const btn = document.getElementById('cam-cancel-btn-' + id);
+  const qtyEl = document.getElementById('cam-cancel-qty-' + id);
+  if (!item || !btn || !qtyEl) return;
+  const m = camCancelModeFor(item, qtyEl.value);
+  btn.textContent = m.mode === 'move' ? '箱変更' : '取消';
+  btn.className = 'q-btn ' + (m.mode === 'move' ? 'move' : 'cancel');
+}
+function camCancelOrMove(id) {
+  const item = camFind(id);
+  if (!item) return;
+  const qtyEl = document.getElementById('cam-cancel-qty-' + id);
+  const m = camCancelModeFor(item, qtyEl ? qtyEl.value : 'ALL_CANCEL');
+  if (m.mode === 'move') camMoveBox(id, m);
+  else camCancel(id);
+}
+async function camMoveBox(id, m) {
+  const item = camFind(id);
+  if (!item || !item.results.length || item.status === 'registering') return;
+  const sel = item.results[item.selIndex] || item.results[0];
+  const fromLabel = m.all ? '全箱' : (m.fromBox || '箱なし');
+  const toLabel = m.toBox || '箱なし';
+  const qtyLabel = m.all ? '全体（出力済を除く）' : (m.qty + '個');
+  if (!await cam_confirm('箱を変更しますか？\n' + cam_dispNo(sel) + ' ' + sel.name + '\n' + qtyLabel + 'を「' + fromLabel + '」から「' + toLabel + '」へ移します（チェック数は変わりません）', '箱を変更する')) return;
+  camDoMoveBox(id, m, false, false);
+}
+function camDoMoveBox(id, m, forceZ, forceBoxAdd) {
+  const item = camFind(id);
+  if (!item) return;
+  const sel = item.results[item.selIndex] || item.results[0];
+  const prevStatus = item.status;
+  item.status = 'registering';
+  item.regError = '';
+  renderCamCard(id);
+  camApi('movebox', { sheetName: sel.sheetName, rowIndex: sel.rowIndex, moveAll: !!m.all, moveQty: m.qty, fromBox: m.all ? '' : m.fromBox, box: m.toBox, orderKey: sel.orderKey || null, forceZ: forceZ, forceBoxAdd: !!forceBoxAdd }).then(async function(data) {
+    if (data && data.boxAddConfirm) {
+      const bx = data.boxAddConfirm.box;
+      item.status = 'done';
+      renderCamCard(id);
+      const step1 = await cam_confirm('この箱（' + bx + '）は箱番号管理表に登録されていません。', '次へ');
+      const step2 = step1 && await cam_confirm('箱番号管理表に「' + bx + '」を追加して、このまま箱を変更しますか？', '追加して変更');
+      if (step2) { camDoMoveBox(id, m, forceZ, true); }
+      else { item.regError = '箱の変更をやめました（箱が管理表に未登録です）。'; renderCamCard(id); setLog('箱の変更をやめました。'); }
+      return;
+    }
+    if (data && data.zConfirm) {
+      const zc = data.zConfirm;
+      item.status = 'done';
+      renderCamCard(id);
+      if (await cam_confirm('この箱には ' + zc.boxZNos.join('、') + ' の物が入っています。\n' + zc.itemZNo + ' の物を同じ箱に移しますか？', '移す')) {
+        camDoMoveBox(id, m, true, forceBoxAdd);
+      } else {
+        item.regError = '箱の変更をやめました（箱のZ番号が違います）。';
+        renderCamCard(id);
+        setLog('箱の変更をやめました。');
+      }
+      return;
+    }
+    sel.checkCount = data.checkCount;
+    sel.orderCount = data.orderCount;
+    sel.exportedCount = data.exportedCount;
+    sel.boxInfo = data.boxInfo;
+    if (data.rowIndex) sel.rowIndex = data.rowIndex;
+    sel.isComplete = sel.checkCount >= sel.orderCount;
+    item.status = (prevStatus === 'registering') ? 'done' : prevStatus;
+    item.regError = '';
+    renderCamCard(id);
+    setLog('箱を変更しました。');
+  }).catch(function(err) {
+    item.status = (prevStatus === 'registering') ? 'done' : prevStatus;
+    item.regError = '直接通信に失敗しました（' + cam_errDetail(err) + '）。もう一度箱を変更してください。';
     renderCamCard(id);
     setLog('直接通信に失敗しました（' + cam_errDetail(err) + '）。');
   });
