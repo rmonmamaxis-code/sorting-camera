@@ -1478,6 +1478,10 @@ function camCancelModeFor(item, cancelVal) {
   const toBox = cam_itemBox(item);
   if (cancelVal === 'ALL_CANCEL') {
     if (!toBox) return { mode: 'cancel' };
+    // ★ 箱設定が今その物が入っている箱と同一（未出力の全量がその箱にある）なら取消ボタン（2026-11-26）。
+    const cancelable = Math.max(0, (sel.checkCount || 0) - (sel.exportedCount || 0));
+    const inTo = cam_parseBoxInfo(sel.boxInfo || '')[toBox] || 0;
+    if (cancelable > 0 && inTo >= cancelable) return { mode: 'cancel' };
     return { mode: 'move', all: true, qty: 0, fromBox: '*', toBox: toBox };
   }
   const parts = String(cancelVal || '').split('|');
