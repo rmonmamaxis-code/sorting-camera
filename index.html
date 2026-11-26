@@ -1157,8 +1157,15 @@ function camDetailBodyHtml(item) {
       + '<select id="cam-box-' + item.id + '" onchange="camSetBoxChoice(\'' + item.id + '\', this.value)">' + optHtml + '</select></div>';
   }
   const zNoteHtml = (camZFilter && item.zFilteredOut > 0) ? '<div style="font-size:12px; color:#6a1b9a; font-weight:bold; margin-bottom:4px;">🎯 ' + camZFilter + ' で絞り込み中（他 ' + item.zFilteredOut + ' 件を非表示）</div>' : '';
+  // ★ 紐付き箱の表示（2026-11-26）: そのZと紐付いている箱（新しい順）。行き先取得後に表示される。
+  let linkedHtml = '';
+  if (item.dest) {
+    const lb = item.dest.linkedBoxes || [];
+    linkedHtml = '<div style="font-size:13px; color:#5e35b1; margin-top:4px;">🔗 紐付き箱' + (item.dest.zNo ? '（' + camEsc(item.dest.zNo) + '）' : '') + ': ' + (lb.length ? lb.map(function(b) { return camEsc(b); }).join(', ') : 'なし') + '</div>';
+  }
   return qrBannerHtml + shogoBadgeHtml + zNoteHtml + boxRowHtml + '<div class="q-title">' + cam_dispNo(sel) + '</div>' + extraHtml + modelHtml
     + '<div style="font-size:14px; margin-top:4px;">品名: ' + sel.name + '</div>'
+    + linkedHtml
     + btnHtml
     + (item.regError ? '<div class="q-err">' + item.regError + '</div>' : '');
 }
