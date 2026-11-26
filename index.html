@@ -5,6 +5,9 @@
      OCR（Stage 11 の2パス）はこのページ内で行い、検索・登録・取消は ver.X の exec URL へ
      直接 fetch POST する（doPost）。GAS タブがバックグラウンド／閉じていても進む。
      直接つながらない場合のみ、元のアプリ（GAS タブ）への postMessage 経由へフォールバックする。
+     2026-11-27 省電力: 画面が見えていない間はカメラを止めて戻ったら再開。
+       90秒操作が無ければ低フレームレート（10fps＋QR検出1秒間隔）に落とし、
+       画面に触れると通常に戻す。
      2026-11-19 部品QRの完全一致検索: 部品QRの形式が確定した
        （「製番:…,手配工番:…,ユニット番号:…,品番:…,改訂:…(任意),図番:…」のキー:値形式）。
        読み取りミスがほぼ無い前提のため、この形式のQRはあいまい検索ではなく
@@ -899,12 +902,22 @@ function cam_recentQueueHas(text) {
   }
   return false;
 }
+// QR検出の間隔。省電力（低フレームレート）中は長くする。
+function cam_qrIntervalMs(mode, lowPower) {
+  if (lowPower) return 1000;
+  return mode === 'jsQR' ? 500 : 300;
+}
+function startQrLoop() {
+  if (qrIntervalId) { clearInterval(qrIntervalId); qrIntervalId = null; }
+  if (!qrMode) return;
+  qrIntervalId = setInterval(scanQrFrame, cam_qrIntervalMs(qrMode, camLowPower));
+}
 function initQrDetector() {
   if ('BarcodeDetector' in window) {
     try {
       qrDetector = new BarcodeDetector({ formats: ['qr_code'] });
       qrMode = 'native';
-      qrIntervalId = setInterval(scanQrFrame, 300);
+      startQrLoop();
       return;
     } catch (e) {
       qrDetector = null;
@@ -913,7 +926,7 @@ function initQrDetector() {
   // フォールバック: jsQR（同梱ファイル）。既に読み込み済みならすぐ開始する。
   if (typeof jsQR === 'function') {
     qrMode = 'jsQR';
-    qrIntervalId = setInterval(scanQrFrame, 500);
+    startQrLoop();
     return;
   }
   const s = document.createElement('script');
@@ -921,7 +934,7 @@ function initQrDetector() {
   s.onload = function() {
     if (typeof jsQR === 'function') {
       qrMode = 'jsQR';
-      qrIntervalId = setInterval(scanQrFrame, 500);
+      startQrLoop();
     } else {
       qrShowManualNote('この端末ではQR自動検出が使えません。手入力で箱を設定してください。');
     }
@@ -1707,9 +1720,84 @@ const logEl = document.getElementById('log');
 const shutterBtn = document.getElementById('shutterBtn');
 
 function setLog(t) { logEl.textContent = t; }
-// 画面復帰時に映像の再生を蹴り直す（保険）。
+
+// ---------- 省電力（2026-11-27） ----------
+// 画面が見えていない間はカメラを止め、戻ったら再開する。
+// 90秒操作が無ければ低フレームレートに落とし、触れると通常に戻す。
+const CAM_IDLE_MS = 90000;
+const CAM_LOW_FPS = 10;
+const CAM_NORMAL_FPS = 30;
+let camRunning = false;
+let camStarting = false;
+let camStoppedByHidden = false;
+let camClosedByUser = false;
+let camLowPower = false;
+let camFocusContinuous = false;
+let camIdleTimerId = null;
+
+function stopCamera() {
+  if (qrIntervalId) { clearInterval(qrIntervalId); qrIntervalId = null; }
+  if (camIdleTimerId) { clearTimeout(camIdleTimerId); camIdleTimerId = null; }
+  try { if (videoTrack) videoTrack.stop(); } catch (e) {}
+  try { if (video && video.srcObject) { video.srcObject.getTracks().forEach(function(t) { t.stop(); }); video.srcObject = null; } } catch (e) {}
+  videoTrack = null;
+  camRunning = false;
+  camLowPower = false;
+  if (torchOn) {
+    torchOn = false;
+    const tb = document.getElementById('torchBtn');
+    if (tb) tb.innerText = '🔦 トーチ ON';
+  }
+}
+
+async function camApplyFps(fps) {
+  if (!videoTrack) return;
+  const c = { frameRate: { ideal: fps } };
+  if (camFocusContinuous) c.advanced = [{ focusMode: 'continuous' }];
+  try { await videoTrack.applyConstraints(c); } catch (e) { /* 対応していない端末では無視 */ }
+}
+
+async function camEnterLowPower() {
+  if (!camRunning || camLowPower) return;
+  camLowPower = true;
+  await camApplyFps(CAM_LOW_FPS);
+  startQrLoop();
+  setLog('省電力モード（低フレームレート）です。画面に触れると通常に戻ります。');
+}
+
+async function camExitLowPower() {
+  if (!camLowPower) return;
+  camLowPower = false;
+  await camApplyFps(CAM_NORMAL_FPS);
+  startQrLoop();
+  setLog('通常モードに戻りました。');
+}
+
+function camArmIdleTimer() {
+  if (camIdleTimerId) clearTimeout(camIdleTimerId);
+  camIdleTimerId = setTimeout(camEnterLowPower, CAM_IDLE_MS);
+}
+
+function camNoteActivity() {
+  if (camLowPower) camExitLowPower();
+  if (camRunning) camArmIdleTimer();
+}
+document.addEventListener('pointerdown', camNoteActivity, true);
+document.addEventListener('keydown', camNoteActivity, true);
+
+// 画面が見えていない間はカメラを止め、戻ったら再開する。
+// 止めていない場合は映像の再生を蹴り直す（保険）。
 document.addEventListener('visibilitychange', function() {
-  if (!document.hidden && video && video.srcObject) { video.play().catch(function() {}); }
+  if (document.hidden) {
+    if (camRunning) { camStoppedByHidden = true; stopCamera(); }
+    return;
+  }
+  if (camStoppedByHidden && !camClosedByUser) {
+    camStoppedByHidden = false;
+    startCamera(true);
+  } else if (video && video.srcObject) {
+    video.play().catch(function() {});
+  }
 });
 function showErr(msg) {
   const box = document.getElementById('errBox');
@@ -1725,6 +1813,7 @@ function showWarn(msg) {
 // 箱QR専用モード: カメラを止めてこの画面（タブ）を閉じる。
 // window.close() が効かない環境では案内を出して手動で閉じてもらう。
 function camCloseSelf() {
+  camClosedByUser = true;
   try { if (videoTrack) videoTrack.stop(); } catch (e) {}
   try { if (video && video.srcObject) { video.srcObject.getTracks().forEach(function(t) { t.stop(); }); video.srcObject = null; } } catch (e) {}
   try { window.close(); } catch (e) {}
@@ -1745,13 +1834,16 @@ function camApplyBoxQrMode() {
   if (hint) hint.style.display = 'none';
 }
 
-async function startCamera() {
-  if (!window.opener) {
+async function startCamera(isRestart) {
+  if (camRunning || camStarting) return;
+  camStarting = true;
+  if (!window.opener && !isRestart) {
     showWarn('仕分けアプリから開いていません。検索・登録は直接通信で行います。直接つながらない場合は仕分けアプリの「連続撮影モード」ボタンから開き直してください。');
   }
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     showErr('このブラウザはカメラに対応していません。Chrome / Safari の最新版で HTTPS で開いてください。');
     setLog('カメラを利用できません。');
+    camStarting = false;
     return;
   }
   try {
@@ -1761,9 +1853,11 @@ async function startCamera() {
     });
     video.srcObject = stream;
     videoTrack = stream.getVideoTracks()[0];
+    camFocusContinuous = false;
     try {
       const caps = videoTrack.getCapabilities ? videoTrack.getCapabilities() : {};
       if (caps.focusMode && caps.focusMode.indexOf('continuous') >= 0) {
+        camFocusContinuous = true;
         await videoTrack.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
       }
       if (caps.torch) {
@@ -1772,8 +1866,10 @@ async function startCamera() {
       }
     } catch (e) { /* 対応していない端末では無視 */ }
     shutterBtn.disabled = false;
-    setLog(CAM_BOXQR_MODE ? '箱のQR（箱識別コード）を映してください。読み取ると自動で登録して画面を閉じます。' : 'カメラ起動中です。枠の中にラベルを入れて「📷 撮影」を押してください。「箱識別コード」のQRを映すと箱を設定できます。部品のQRを映すとキューに入って検索します。');
+    setLog(isRestart ? 'カメラを再開しました。' : (CAM_BOXQR_MODE ? '箱のQR（箱識別コード）を映してください。読み取ると自動で登録して画面を閉じます。' : 'カメラ起動中です。枠の中にラベルを入れて「📷 撮影」を押してください。「箱識別コード」のQRを映すと箱を設定できます。部品のQRを映すとキューに入って検索します。'));
     initQrDetector();
+    camRunning = true;
+    camNoteActivity();
     sendHello();
   } catch (err) {
     const name = err && err.name ? err.name : '';
@@ -1785,9 +1881,11 @@ async function startCamera() {
     showErr(msg);
     setLog('カメラを利用できません。');
   }
+  camStarting = false;
 }
 
 function takeShot() {
+  camNoteActivity();
   if (CAM_BOXQR_MODE) return;
   if (!video.videoWidth) { setLog('カメラの準備中です。少し待って撮影してください。'); return; }
   flashCam();
@@ -1845,8 +1943,8 @@ document.getElementById('torchBtn').addEventListener('click', async function() {
   } catch (e) { /* 対応していない端末では無視 */ }
 });
 document.getElementById('closeBtn').addEventListener('click', function() {
-  if (videoTrack) videoTrack.stop();
-  if (video.srcObject) { video.srcObject.getTracks().forEach(function(t) { t.stop(); }); video.srcObject = null; }
+  camClosedByUser = true;
+  stopCamera();
   setLog('カメラを終了しました。このタブを閉じて仕分けアプリに戻ってください。');
   try { window.close(); } catch (e) {}
 });
