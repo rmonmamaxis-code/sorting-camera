@@ -41,11 +41,14 @@
   #topBar { background: #37474f; border-radius: 8px; padding: 10px; text-align: left; margin-bottom: 10px; }
   #boxBadge { font-size: 16px; font-weight: bold; }
   #boxBadge.active { color: #b9f6ca; }
+  .sticky-box-bar { position: sticky; top: 0; z-index: 100; background: #37474f; color: #eceff1; padding: 10px; font-size: 15px; font-weight: bold; text-align: center; margin: -10px -10px 10px -10px; box-shadow: 0 2px 6px rgba(0,0,0,0.3); }
+  .sticky-box-bar.active { background: #5e35b1; color: #fff; }
   #qrBtn { display: none; width: 100%; margin-top: 8px; padding: 14px; font-size: 16px; font-weight: bold; border: none; border-radius: 8px; background: #7b1fa2; color: #fff; cursor: pointer; }
   #qrBtn:disabled { background: #78909c; }
   #boxManual { display: flex; gap: 8px; margin-top: 8px; }
   #boxManual input { flex: 1; font-size: 15px; padding: 10px; border-radius: 8px; border: none; }
   #boxManual button { font-size: 14px; font-weight: bold; padding: 10px 14px; border: none; border-radius: 8px; background: #00897b; color: #fff; cursor: pointer; }
+  #boxManual #boxResetBtn { background: #78909c; }
   #camWrap { position: relative; max-width: 640px; margin: 0 auto; touch-action: manipulation; cursor: pointer; }
   #cam { width: 100%; max-width: 640px; border-radius: 8px; background: #000; display: block; }
   #camFrame { position: absolute; left: 6%; top: 8%; width: 88%; height: 84%; border: 3px solid rgba(255,255,255,0.85); border-radius: 8px; pointer-events: none; box-sizing: border-box; }
@@ -100,6 +103,7 @@
 </style>
 </head>
 <body>
+<div id="stickyBoxBar" class="sticky-box-bar">📦 現在の箱: <span id="stickyBoxName">未設定（箱なし）</span></div>
 <h1>📷 連続撮影カメラ（ver.X）</h1>
 <div id="warnBox" class="warn" style="display:none"></div>
 <div id="errBox" class="err" style="display:none"></div>
@@ -118,6 +122,7 @@
   <div id="boxManual">
     <input id="boxInput" type="text" placeholder="箱を手入力（QRが読めないとき）">
     <button id="boxSetBtn">箱を設定</button>
+    <button id="boxResetBtn">リセット</button>
   </div>
   <div id="qrNote" style="display:none; font-size:12px; color:#ffcc80; margin-top:6px;"></div>
 </div>
@@ -678,14 +683,38 @@ function cam_fallbackCapture(item) {
 function setBoxBadge(box) {
   currentBox = box || '';
   const el = document.getElementById('boxBadge');
+  const stickyBar = document.getElementById('stickyBoxBar');
+  const stickyName = document.getElementById('stickyBoxName');
   if (currentBox) {
-    el.innerText = '📦 現在の箱: ' + currentBox;
+    const cached = camBoxInfoCache[currentBox] || '';
+    el.innerText = '📦 現在の箱: ' + currentBox + cached;
     el.classList.add('active');
+    if (stickyName) stickyName.innerText = currentBox + cached;
+    if (stickyBar) stickyBar.classList.add('active');
+    camFetchBoxInfo(currentBox);
   } else {
     el.innerText = '📦 現在の箱: 未設定（箱なし）';
     el.classList.remove('active');
+    if (stickyName) stickyName.innerText = '未設定（箱なし）';
+    if (stickyBar) stickyBar.classList.remove('active');
   }
   if (qrButtonValue && qrButtonValue === currentBox) hideQrButton();
+}
+// ★ 箱の表示情報（2026-11-26）: 箱番号の後ろに「対応Z」または「未登録の箱」を付ける。
+// サーバー（boxinfo）から取り、現在の箱のときだけ表示を更新する。結果はキャッシュする。
+let camBoxInfoCache = {};
+function camFetchBoxInfo(box) {
+  if (!box || box !== currentBox) return;
+  camApi('boxinfo', { box: box }).then(function(data) {
+    if (!data || !data.ok) return;
+    const label = data.label || '';
+    camBoxInfoCache[box] = label;
+    if (currentBox !== box) return;
+    const el = document.getElementById('boxBadge');
+    if (el) el.innerText = '📦 現在の箱: ' + box + label;
+    const stickyName = document.getElementById('stickyBoxName');
+    if (stickyName) stickyName.innerText = box + label;
+  }).catch(function() {});
 }
 
 // ---------- QR 自動検出（箱設定） ----------
@@ -715,6 +744,12 @@ document.getElementById('boxSetBtn').addEventListener('click', function() {
   setBoxBadge(v);
   setLog('目標箱を「' + v + '」にセットしました。');
   postToGas({ type: 'set-box', box: v });
+});
+document.getElementById('boxResetBtn').addEventListener('click', function() {
+  document.getElementById('boxInput').value = '';
+  setBoxBadge('');
+  setLog('箱の設定を解除しました（箱なし）。');
+  postToGas({ type: 'clear-box' });
 });
 
 // ---------- QR 自動検出（箱設定）: BarcodeDetector 優先、無ければ jsQR ----------
@@ -1279,6 +1314,7 @@ function camDoRegister(id, sel, qty, forceZ, forceBoxAdd) {
     item.regError = '';
     renderCamCard(id);
     setLog('登録しました。');
+    camFetchBoxInfo(cam_itemBox(item));
   }).catch(function(err) {
     if (item.source === 'qr') {
       item.status = 'done';
@@ -1358,6 +1394,7 @@ function camDoRegisterCandidate(id, idx, qty, forceZ, forceBoxAdd) {
       if (bodyEl) bodyEl.innerHTML = camDetailBodyHtml(item);
     }
     setLog('登録しました。');
+    camFetchBoxInfo(cam_itemBox(item));
   }).catch(function(err) {
     item.candRegIdx = -1;
     item.regError = '直接通信に失敗しました（' + cam_errDetail(err) + '）。もう一度登録してください。';
@@ -1452,6 +1489,7 @@ function camDoMoveBox(id, m, forceZ, forceBoxAdd) {
     item.regError = '';
     renderCamCard(id);
     setLog('箱を変更しました。');
+    camFetchBoxInfo(m.toBox);
   }).catch(function(err) {
     item.status = (prevStatus === 'registering') ? 'done' : prevStatus;
     item.regError = '直接通信に失敗しました（' + cam_errDetail(err) + '）。もう一度箱を変更してください。';
