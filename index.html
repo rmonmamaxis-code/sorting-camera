@@ -1145,6 +1145,7 @@ function camDetailBodyHtml(item) {
     const seenB = {};
     function addOpt(v, label) { if (v && !seenB[v]) { seenB[v] = true; opts.push({ v: v, label: label }); } }
     if (item.dest && item.dest.box) addOpt(item.dest.box, item.dest.box + '（' + camEsc(item.dest.zNo) + 'の行き先）');
+    ((item.dest && item.dest.linkedBoxes) || []).forEach(function(b) { addOpt(b, b + '（このZと紐付いている箱）'); });
     ((item.dest && item.dest.boxesWithZ) || []).forEach(function(b) { addOpt(b, b + '（このZが入っている箱）'); });
     addOpt(currentBox, currentBox + '（今設定中の箱）');
     const selVal = cam_itemBox(item);
