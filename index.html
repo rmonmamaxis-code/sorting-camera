@@ -75,6 +75,12 @@
   .q-del { background: none; border: none; font-size: 18px; cursor: pointer; color: #78909c; padding: 4px 8px; flex: none; }
   .q-summary { font-size: 13px; color: #37474f; margin-top: 8px; }
   .q-detail { margin-top: 10px; border-top: 1px dashed #b0bec5; padding-top: 10px; }
+  .q-cand-toggle { display: block; width: 100%; margin-top: 10px; padding: 10px; font-size: 14px; font-weight: bold; color: #1565c0; background: #e3f2fd; border: 1px solid #90caf9; border-radius: 6px; cursor: pointer; }
+  .q-cand-row { padding: 8px 10px; border: 1px solid #cfd8dc; border-radius: 6px; margin-top: 6px; cursor: pointer; background: #fff; }
+  .q-cand-row.selected { border-color: #1565c0; background: #e3f2fd; }
+  .q-cand-row .cand-no { font-size: 16px; font-weight: bold; color: #c62828; }
+  .q-cand-row .cand-sub { font-size: 13px; color: #37474f; margin-top: 2px; }
+  .q-cand-more { display: block; width: 100%; margin-top: 6px; padding: 8px; font-size: 13px; font-weight: bold; color: #1565c0; background: none; border: 1px dashed #90caf9; border-radius: 6px; cursor: pointer; }
   .q-title { font-size: 22px; font-weight: bold; color: #c62828; }
   .q-row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
   .q-row select { flex: 1; font-size: 15px; padding: 8px; }
@@ -545,7 +551,7 @@ function cam_addQrItem(text) {
   const id = 'c' + (camNextId++);
   const item = {
     id: id, thumb: '', text: text, source: 'qr', image: '',
-    status: 'searching', error: '', results: [], selIndex: 0, expanded: true, showOcrText: false,
+    status: 'searching', error: '', results: [], selIndex: 0, expanded: true, showOcrText: false, showCands: false, showAllCands: false,
     detectedQty: null, regError: '', pendingOp: null, directFailed: false, watchdog: null
   };
   camQueueItems.push(item);
@@ -1014,6 +1020,49 @@ function camDetailBodyHtml(item) {
     + (item.regError ? '<div class="q-err">' + item.regError + '</div>' : '');
 }
 
+// ★ 候補選択（2026-11-26）: 候補ドロップダウンをやめ、カード最下部の展開ボタンで
+// 候補リスト（番号・型式・品名）をカード内に展開する。旧来の登録画面の候補カードと
+// 同じ見た目で、タップで選択する。上位10件を表示し、それ以上は「残りを表示」で全件。
+function camCandToggleLabel(item) {
+  return item.showCands ? '▲ 候補を閉じる' : ('▼ 候補を展開（' + item.results.length + '件）');
+}
+function camCandListHtml(item) {
+  if (!item.showCands || !item.results.length) return '';
+  const LIMIT = 10;
+  const list = item.showAllCands ? item.results : item.results.slice(0, LIMIT);
+  let html = '';
+  list.forEach(function(r, i) {
+    const selCls = i === item.selIndex ? ' selected' : '';
+    const scoreTxt = item.qr ? '完全一致' : (r.score + '点');
+    const modelTxt = r.displayModel || r.model || '';
+    html += '<div class="q-cand-row' + selCls + '" onclick="camSelectCandidate(\'' + item.id + '\', ' + i + ')">'
+      + '<span class="cand-no">' + cam_dispNo(r) + '</span>'
+      + ' <span style="font-size:12px; color:#607d8b;">' + (i + 1) + '位 ／ ' + scoreTxt + ' ／ ' + r.checkCount + ' / ' + r.orderCount + ' 個' + (r.shogo === '対象外' ? ' ／ 対象外・消込済' : '') + '</span>'
+      + '<div class="cand-sub">' + (modelTxt ? '型式: ' + camEsc(modelTxt) + ' ／ ' : '') + '品名: ' + camEsc(r.name || '') + '</div>'
+      + '</div>';
+  });
+  if (!item.showAllCands && item.results.length > LIMIT) {
+    html += '<button class="q-cand-more" onclick="camShowAllCands(\'' + item.id + '\')">残り ' + (item.results.length - LIMIT) + ' 件を表示</button>';
+  }
+  return html;
+}
+function camToggleCands(id) {
+  const item = camFind(id);
+  if (!item) return;
+  item.showCands = !item.showCands;
+  if (!item.showCands) item.showAllCands = false;
+  const y = window.scrollY;
+  renderCamCard(id);
+  window.scrollTo(0, y);
+}
+function camShowAllCands(id) {
+  const item = camFind(id);
+  if (!item) return;
+  item.showAllCands = true;
+  const listEl = document.getElementById('cam-candlist-' + id);
+  if (listEl) listEl.innerHTML = camCandListHtml(item);
+  else renderCamCard(id);
+}
 function renderCamCard(id) {
   const item = camFind(id);
   const area = document.getElementById('queueArea');
@@ -1039,14 +1088,12 @@ function renderCamCard(id) {
   let summaryHtml = camSummaryHtml(item);
   let detailHtml = '';
   if (item.expanded && (item.status === 'done' || item.status === 'registered') && item.results.length) {
-    const sel = item.results[item.selIndex] || item.results[0];
-    let candOptions = '';
-    item.results.forEach(function(r, i) {
-      candOptions += '<option value="' + i + '"' + (i === item.selIndex ? ' selected' : '') + '>' + (i + 1) + '位 ' + cam_dispNo(r) + '（' + r.score + '点）' + (r.shogo === '対象外' ? '【対象外】' : '') + '</option>';
-    });
     detailHtml = '<div class="q-detail">'
-      + '<div class="q-row"><span style="font-size:13px; font-weight:bold;">候補:</span><select onchange="camSelectCandidate(\'' + item.id + '\', this.value)">' + candOptions + '</select></div>'
       + '<div id="cam-detail-body-' + item.id + '">' + camDetailBodyHtml(item) + '</div>'
+      + (item.results.length >= 2
+          ? '<button class="q-cand-toggle" id="cam-candbtn-' + item.id + '" onclick="camToggleCands(\'' + item.id + '\')">' + camCandToggleLabel(item) + '</button>'
+            + '<div id="cam-candlist-' + item.id + '">' + camCandListHtml(item) + '</div>'
+          : '')
       + '</div>';
 
   } else if (item.expanded && item.otherMatches && item.otherMatches.length) {
@@ -1089,15 +1136,20 @@ function camSelectCandidate(id, idx) {
   const item = camFind(id);
   if (!item) return;
   item.selIndex = Number(idx) || 0;
-  // 候補の切り替えではカード全体を作り直さない。候補プルダウン自体はそのままにし、
-  // 要約と詳細本体だけを差し替える。全体を作り直すと iPhone でプルダウンを閉じた
-  // 拍子にスクロール位置が飛び、展開が閉じたように見えるため。
+  item.showCands = false;
+  item.showAllCands = false;
+  // 候補の切り替えではカード全体を作り直さない。要約と詳細本体だけを差し替え、
+  // 候補リストは閉じる（全体を作り直すとスクロール位置が飛ぶため）。
   const summaryEl = document.getElementById('cam-summary-' + id);
   const bodyEl = document.getElementById('cam-detail-body-' + id);
   const cardEl = document.getElementById('cam-card-' + id);
   if (summaryEl && bodyEl && cardEl) {
     summaryEl.outerHTML = camSummaryHtml(item);
     bodyEl.innerHTML = camDetailBodyHtml(item);
+    const listEl = document.getElementById('cam-candlist-' + id);
+    if (listEl) listEl.innerHTML = '';
+    const btnEl = document.getElementById('cam-candbtn-' + id);
+    if (btnEl) btnEl.textContent = camCandToggleLabel(item);
     const top = (item.status === 'done' || item.status === 'registered') && item.results.length ? (item.results[item.selIndex] || item.results[0]) : null;
     if (top && top.shogo === '対象外') { cardEl.style.opacity = '0.55'; cardEl.style.background = '#eceff1'; }
     else { cardEl.style.opacity = ''; cardEl.style.background = ''; }
@@ -1395,7 +1447,7 @@ function takeShot() {
   const id = 'c' + (camNextId++);
   const item = {
     id: id, thumb: thumbUrl, text: '', source: 'camera', image: dataUrl,
-    status: 'searching', error: '', results: [], selIndex: 0, expanded: false, showOcrText: false,
+    status: 'searching', error: '', results: [], selIndex: 0, expanded: false, showOcrText: false, showCands: false, showAllCands: false,
     detectedQty: null, regError: '', pendingOp: null, directFailed: false, watchdog: null
   };
   camQueueItems.push(item);
