@@ -49,6 +49,10 @@
   #boxManual input { flex: 1; font-size: 15px; padding: 10px; border-radius: 8px; border: none; }
   #boxManual button { font-size: 14px; font-weight: bold; padding: 10px 14px; border: none; border-radius: 8px; background: #00897b; color: #fff; cursor: pointer; }
   #boxManual #boxResetBtn { background: #78909c; }
+  #zManual { display: flex; gap: 8px; margin-top: 8px; }
+  #zManual input { flex: 1; font-size: 15px; padding: 10px; border-radius: 8px; border: none; }
+  #zManual button { font-size: 14px; font-weight: bold; padding: 10px 14px; border: none; border-radius: 8px; background: #00897b; color: #fff; cursor: pointer; }
+  #zManual #zResetBtn { background: #78909c; }
   #camWrap { position: relative; max-width: 640px; margin: 0 auto; touch-action: manipulation; cursor: pointer; }
   #cam { width: 100%; max-width: 640px; border-radius: 8px; background: #000; display: block; }
   #camFrame { position: absolute; left: 6%; top: 8%; width: 88%; height: 84%; border: 3px solid rgba(255,255,255,0.85); border-radius: 8px; pointer-events: none; box-sizing: border-box; }
@@ -103,7 +107,7 @@
 </style>
 </head>
 <body>
-<div id="stickyBoxBar" class="sticky-box-bar">📦 現在の箱: <span id="stickyBoxName">未設定（箱なし）</span></div>
+<div id="stickyBoxBar" class="sticky-box-bar">📦 現在の箱: <span id="stickyBoxName">未設定（箱なし）</span><span id="stickyZ"></span></div>
 <h1>📷 連続撮影カメラ（ver.X）</h1>
 <div id="warnBox" class="warn" style="display:none"></div>
 <div id="errBox" class="err" style="display:none"></div>
@@ -123,6 +127,11 @@
     <input id="boxInput" type="text" placeholder="箱を手入力（QRが読めないとき）">
     <button id="boxSetBtn">箱を設定</button>
     <button id="boxResetBtn">リセット</button>
+  </div>
+  <div id="zManual">
+    <input id="zInput" type="text" placeholder="Z番号を手入力（検索結果を絞り込む）">
+    <button id="zSetBtn">Zを設定</button>
+    <button id="zResetBtn">リセット</button>
   </div>
   <div id="qrNote" style="display:none; font-size:12px; color:#ffcc80; margin-top:6px;"></div>
 </div>
@@ -532,11 +541,46 @@ function cam_armWatchdog(item, ms) {
 // 表示用の番号はユニットNo＋部品Noの組み合わせ（例: Z02-021）。number が無い行は unitNo を使う。
 // （2026-11-20 ユーザー指示: Z02000 のようなユニットNo単独表示は見づらいため変更）
 function cam_dispNo(r) { return (r && (r.number || r.unitNo)) || ''; }
+// ★ Z番号の絞り込み（2026-11-26）: 設定したZ番号の候補だけを検索結果に残す。
+// 元の検索結果は item.allResults に保持し、絞り込みの変更時は未登録カードへ適用し直す。
+let camZFilter = '';
+function cam_normZ(v) {
+  const s = String(v || '').trim().toUpperCase();
+  if (!s) return '';
+  const m = s.match(/^Z?(\d+)$/);
+  if (m) return 'Z' + m[1].padStart(2, '0');
+  return s;
+}
+function cam_applyZFilter(item) {
+  const all = item.allResults || [];
+  if (!camZFilter) { item.results = all; item.zFilteredOut = 0; return; }
+  const kept = all.filter(function(r) { return cam_zNoOf(r) === camZFilter; });
+  item.zFilteredOut = all.length - kept.length;
+  item.results = kept;
+  if (item.selIndex >= kept.length) item.selIndex = 0;
+}
+function camSetZFilter(v) {
+  camZFilter = cam_normZ(v);
+  const el = document.getElementById('stickyZ');
+  if (el) el.innerText = camZFilter ? ' ／ 🎯 ' + camZFilter + ' で絞り込み中' : '';
+  camQueueItems.forEach(function(item) {
+    if (!item.allResults || !item.allResults.length) return;
+    if (item.status !== 'done' && item.status !== 'nohit') return;
+    cam_applyZFilter(item);
+    item.status = item.results.length ? 'done' : 'nohit';
+    if (!item.results.length) {
+      item.error = camZFilter ? (camZFilter + ' に一致する候補がありません（絞り込み前 ' + item.allResults.length + ' 件）') : '該当なし';
+    }
+    renderCamCard(item.id);
+    if (item.status === 'done') cam_refreshDest(item);
+  });
+}
 function cam_applySearchResult(item, results, queryText) {
-  item.results = results || [];
+  item.allResults = results || [];
   item.selIndex = 0;
+  cam_applyZFilter(item);
   item.status = item.results.length ? 'done' : 'nohit';
-  if (!item.results.length) item.error = '該当なし';
+  if (!item.results.length) item.error = (item.allResults.length && camZFilter) ? (camZFilter + ' に一致する候補がありません（絞り込み前 ' + item.allResults.length + ' 件）') : '該当なし';
   if (item.source !== 'qr' && item.results.length && item.boxChoice === undefined) item.boxChoice = currentBox;
   renderCamCard(item.id);
   if (item.source !== 'qr') cam_refreshDest(item);
@@ -580,7 +624,7 @@ function cam_addQrItem(text) {
   const id = 'c' + (camNextId++);
   const item = {
     id: id, thumb: '', text: text, source: 'qr', image: '',
-    status: 'searching', error: '', results: [], selIndex: 0, expanded: true, showOcrText: false, showCands: false, showAllCands: false, candRegIdx: -1,
+    status: 'searching', error: '', results: [], allResults: [], zFilteredOut: 0, selIndex: 0, expanded: true, showOcrText: false, showCands: false, showAllCands: false, candRegIdx: -1,
     detectedQty: null, regError: '', pendingOp: null, directFailed: false, watchdog: null
   };
   camQueueItems.push(item);
@@ -751,6 +795,17 @@ document.getElementById('boxResetBtn').addEventListener('click', function() {
   setLog('箱の設定を解除しました（箱なし）。');
   postToGas({ type: 'clear-box' });
 });
+document.getElementById('zSetBtn').addEventListener('click', function() {
+  const v = document.getElementById('zInput').value.trim();
+  if (!v) return;
+  camSetZFilter(v);
+  setLog('検索結果を「' + camZFilter + '」で絞り込みます。');
+});
+document.getElementById('zResetBtn').addEventListener('click', function() {
+  document.getElementById('zInput').value = '';
+  camSetZFilter('');
+  setLog('Z番号の絞り込みを解除しました。');
+});
 
 // ---------- QR 自動検出（箱設定）: BarcodeDetector 優先、無ければ jsQR ----------
 // BarcodeDetector がある端末（Android Chrome など）は従来通りそれを使う。
@@ -812,6 +867,14 @@ function qrHandleValue(raw) {
     if (parsed.text !== lastQrValue) {
       lastQrValue = parsed.text;
       setLog('これは箱のQRではありません。箱のQR（箱識別コード）を映してください。');
+    }
+    return;
+  }
+  // ★ 専用形式（キー:値）以外の部品QRは関係ないQRとしてキューに入れない（2026-11-26）。
+  if (!cam_parsePartQr(parsed.text)) {
+    if (parsed.text !== lastQrValue) {
+      lastQrValue = parsed.text;
+      setLog('専用形式以外のQRのため無視しました: ' + cam_logClip(parsed.text));
     }
     return;
   }
@@ -1092,7 +1155,8 @@ function camDetailBodyHtml(item) {
     boxRowHtml = '<div class="q-row"><span style="font-size:13px; font-weight:bold;">箱:</span>'
       + '<select id="cam-box-' + item.id + '" onchange="camSetBoxChoice(\'' + item.id + '\', this.value)">' + optHtml + '</select></div>';
   }
-  return qrBannerHtml + shogoBadgeHtml + boxRowHtml + '<div class="q-title">' + cam_dispNo(sel) + '</div>' + extraHtml + modelHtml
+  const zNoteHtml = (camZFilter && item.zFilteredOut > 0) ? '<div style="font-size:12px; color:#6a1b9a; font-weight:bold; margin-bottom:4px;">🎯 ' + camZFilter + ' で絞り込み中（他 ' + item.zFilteredOut + ' 件を非表示）</div>' : '';
+  return qrBannerHtml + shogoBadgeHtml + zNoteHtml + boxRowHtml + '<div class="q-title">' + cam_dispNo(sel) + '</div>' + extraHtml + modelHtml
     + '<div style="font-size:14px; margin-top:4px;">品名: ' + sel.name + '</div>'
     + btnHtml
     + (item.regError ? '<div class="q-err">' + item.regError + '</div>' : '');
@@ -1550,11 +1614,12 @@ window.addEventListener('message', function(event) {
     if (!item) return;
     if (d.type === 'search-result') {
       item.text = d.queryText || item.text;
-      item.results = d.results || [];
+      item.allResults = d.results || [];
       item.detectedQty = (typeof d.detectedQty === 'number') ? d.detectedQty : null;
       item.selIndex = 0;
+      cam_applyZFilter(item);
       item.status = item.results.length ? 'done' : 'nohit';
-      if (!item.results.length) item.error = '該当なし';
+      if (!item.results.length) item.error = (item.allResults.length && camZFilter) ? (camZFilter + ' に一致する候補がありません（絞り込み前 ' + item.allResults.length + ' 件）') : '該当なし';
       // 直接通信が失敗してフォールバックした登録・取消が保留中なら、GAS 経由で送り直す。
       if (item.pendingOp && item.results.length) {
         const op = item.pendingOp; item.pendingOp = null;
@@ -1651,7 +1716,7 @@ function camCloseSelf() {
 // 箱QR専用モードでは撮影キュー等のUIを隠し、箱QRの読み取りだけに絞る。
 function camApplyBoxQrMode() {
   if (!CAM_BOXQR_MODE) return;
-  ['sheetRow', 'boxManual', 'shotCount', 'queueSection'].forEach(function(id) {
+  ['sheetRow', 'boxManual', 'zManual', 'shotCount', 'queueSection'].forEach(function(id) {
     const el = document.getElementById(id);
     if (el) el.style.display = 'none';
   });
@@ -1724,7 +1789,7 @@ function takeShot() {
   const id = 'c' + (camNextId++);
   const item = {
     id: id, thumb: thumbUrl, text: '', source: 'camera', image: dataUrl,
-    status: 'searching', error: '', results: [], selIndex: 0, expanded: false, showOcrText: false, showCands: false, showAllCands: false, candRegIdx: -1,
+    status: 'searching', error: '', results: [], allResults: [], zFilteredOut: 0, selIndex: 0, expanded: false, showOcrText: false, showCands: false, showAllCands: false, candRegIdx: -1,
     detectedQty: null, regError: '', pendingOp: null, directFailed: false, watchdog: null
   };
   camQueueItems.push(item);
