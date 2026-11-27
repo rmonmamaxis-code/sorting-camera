@@ -5,6 +5,8 @@
      OCR（Stage 11 の2パス）はこのページ内で行い、検索・登録・取消は ver.X の exec URL へ
      直接 fetch POST する（doPost）。GAS タブがバックグラウンド／閉じていても進む。
      直接つながらない場合のみ、元のアプリ（GAS タブ）への postMessage 経由へフォールバックする。
+     2026-11-27 箱プルダウンの色分け: 設定中の箱が優先表示のときは紫枠、
+       行き先（最後にそのZを入れた箱）の表示のときは黄色枠。
      2026-11-27 Z番号が取れない物は Z0 として扱う（Zフィルタ・行き先の判定）。
      2026-11-27 省電力: 画面が見えていない間はカメラを止めて戻ったら再開。
        90秒操作が無ければ低フレームレート（10fps＋QR検出1秒間隔）に落とし、
@@ -1066,6 +1068,14 @@ function cam_itemBox(item) {
   if (item && item.boxChoice !== undefined && item.boxChoice !== null) return item.boxChoice;
   return currentBox;
 }
+// 箱プルダウンの枠色（2026-11-27）: 設定中の箱が優先表示なら紫、
+// 行き先（最後にそのZを入れた箱）の表示なら黄色。手動で選んだ場合は色なし。
+function cam_boxSelectStyle(item) {
+  const v = cam_itemBox(item);
+  if (item && !item.boxTouched && currentBox && v === currentBox) return 'border:2px solid #7b1fa2; border-radius:6px; background-color:#f3e5f5; font-weight:bold;';
+  if (item && !item.boxTouched && item.dest && item.dest.box && v === item.dest.box) return 'border:2px solid #f9a825; border-radius:6px; background-color:#fff8e1; font-weight:bold;';
+  return '';
+}
 function camSetBoxChoice(id, v) { const it = camFind(id); if (it) { it.boxChoice = v; it.boxTouched = true; } camRefreshCancelBtn(id); }
 // 画面内の確認ダイアログ。ブラウザ標準の confirm() は Android Chrome で
 // カメラ映像の描画レイヤーを壊すことがあるため使わない（2026-11-24）。
@@ -1171,7 +1181,7 @@ function camDetailBodyHtml(item) {
     }).join('');
     optHtml += '<option value=""' + (selVal === '' ? ' selected' : '') + '>箱なし</option>';
     boxRowHtml = '<div class="q-row"><span style="font-size:13px; font-weight:bold;">箱:</span>'
-      + '<select id="cam-box-' + item.id + '" onchange="camSetBoxChoice(\'' + item.id + '\', this.value)">' + optHtml + '</select></div>';
+      + '<select id="cam-box-' + item.id + '" style="' + cam_boxSelectStyle(item) + '" onchange="camSetBoxChoice(\'' + item.id + '\', this.value)">' + optHtml + '</select></div>';
   }
   const zNoteHtml = (camZFilter && item.zFilteredOut > 0) ? '<div style="font-size:12px; color:#6a1b9a; font-weight:bold; margin-bottom:4px;">🎯 ' + camZFilter + ' で絞り込み中（他 ' + item.zFilteredOut + ' 件を非表示）</div>' : '';
   // ★ 紐付き箱の表示（2026-11-26）: そのZと紐付いている箱（新しい順）。行き先取得後に表示される。
