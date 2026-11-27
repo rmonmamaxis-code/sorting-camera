@@ -5,6 +5,7 @@
      OCR（Stage 11 の2パス）はこのページ内で行い、検索・登録・取消は ver.X の exec URL へ
      直接 fetch POST する（doPost）。GAS タブがバックグラウンド／閉じていても進む。
      直接つながらない場合のみ、元のアプリ（GAS タブ）への postMessage 経由へフォールバックする。
+     2026-11-27 行き先の取得中は「箱を確認中…」の暫定表示にし、登録等を止める。
      2026-11-27 箱プルダウンの色分け: 設定中の箱が優先表示のときは紫枠、
        行き先（最後にそのZを入れた箱）の表示のときは黄色枠。
      2026-11-27 Z番号が取れない物は Z0 として扱う（Zフィルタ・行き先の判定）。
@@ -244,8 +245,13 @@ async function cam_refreshDest(item) {
   const key = sheet + '|' + zNo + '|' + (sel.number || '');
   if (item.destKey === key) return;
   item.destKey = key;
+  // ★ 行き先の取得中は「箱を確認中…」の暫定表示にする（2026-11-27）。
+  item.destPending = true;
+  const pendBodyEl = document.getElementById('cam-detail-body-' + item.id);
+  if (pendBodyEl && item.expanded) pendBodyEl.innerHTML = camDetailBodyHtml(item);
   try {
     const data = await camApi('boxdest', { seiban: sheet, zNo: zNo, number: sel.number || '' });
+    item.destPending = false;
     item.dest = data.dest || null;
     // ★ 設定中の箱があればそれを優先する（2026-11-26）。無ければ行き先（部品単位→Z単位）。
     if (!item.boxTouched) item.boxChoice = currentBox ? currentBox : ((item.dest && item.dest.box) ? item.dest.box : '');
@@ -253,7 +259,12 @@ async function cam_refreshDest(item) {
     if (summaryEl) summaryEl.outerHTML = camSummaryHtml(item);
     const bodyEl = document.getElementById('cam-detail-body-' + item.id);
     if (bodyEl && item.expanded) bodyEl.innerHTML = camDetailBodyHtml(item);
-  } catch (e) { /* 行き先が引けないときは今の箱のまま */ }
+  } catch (e) {
+    // 行き先が引けないときは今の箱のまま。暫定表示だけ解除する。
+    item.destPending = false;
+    const failBodyEl = document.getElementById('cam-detail-body-' + item.id);
+    if (failBodyEl && item.expanded) failBodyEl.innerHTML = camDetailBodyHtml(item);
+  }
 }
 // エラーの中身を短く表示するための整形（2026-11-20: 汎用メッセージで握りつぶさない）。
 function cam_errDetail(err) {
@@ -1136,12 +1147,13 @@ function camSummaryHtml(item) {
 
 function camDetailBodyHtml(item) {
   const sel = item.results[item.selIndex] || item.results[0];
+  const destBusy = !!item.destPending;
   const extraHtml = sel.extraModelText ? '<div style="font-weight:bold; font-size:14px; color:#1565c0; margin-bottom:4px;">' + sel.extraModelText + '</div>' : '';
   const modelHtml = sel.displayModel ? '<div style="font-weight:bold; font-size:15px;">型式寸法: <span style="color:#333;">' + sel.displayModel + '</span></div>' : '';
   const cancelOptionsStr = cam_cancelOptions(sel);
   let cancelHtml = '';
   if (cancelOptionsStr) {
-    const cancelBusy = item.status === 'registering';
+    const cancelBusy = item.status === 'registering' || destBusy;
     const initMode = camCancelModeFor(item, 'ALL_CANCEL');
     cancelHtml = '<div class="q-row"><select id="cam-cancel-qty-' + item.id + '" onchange="camRefreshCancelBtn(\'' + item.id + '\')"' + (cancelBusy ? ' disabled' : '') + '>' + cancelOptionsStr + '</select>'
       + '<button class="q-btn ' + (initMode.mode === 'move' ? 'move' : 'cancel') + '" id="cam-cancel-btn-' + item.id + '" onclick="camCancelOrMove(\'' + item.id + '\')"' + (cancelBusy ? ' disabled' : '') + '>' + (initMode.mode === 'move' ? '箱変更' : '取消') + '</button></div>';
@@ -1152,7 +1164,7 @@ function camDetailBodyHtml(item) {
   if (sel.isComplete) {
     btnHtml = '<div style="font-weight:bold; color:#2e7d32; margin-bottom:5px;">✅ チェック完了 (' + sel.checkCount + ' / ' + sel.orderCount + ' 個)</div>' + cancelHtml;
   } else {
-    const regBusy = item.status === 'registering';
+    const regBusy = item.status === 'registering' || destBusy;
     btnHtml = '<div style="font-weight:bold; color:#1565c0; margin-bottom:5px;">⏳ 未完了 (' + sel.checkCount + ' / ' + sel.orderCount + ' 個)</div>'
       + '<div class="q-row"><select id="cam-add-qty-' + item.id + '" style="width:120px; flex:none; background-color:#f1f6fb;"' + (regBusy ? ' disabled' : '') + '>' + cam_qtyOptions(sel, item.detectedQty) + '</select>'
       + '<button class="q-btn" onclick="camRegister(\'' + item.id + '\')"' + (regBusy ? ' disabled' : '') + '>' + (regBusy ? '登録中…' : '登録') + '</button></div>' + cancelHtml;
@@ -1175,13 +1187,18 @@ function camDetailBodyHtml(item) {
     ((item.dest && item.dest.linkedBoxes) || []).forEach(function(b) { addOpt(b, b + '（このZと紐付いている箱）'); });
     ((item.dest && item.dest.boxesWithZ) || []).forEach(function(b) { addOpt(b, b + '（このZが入っている箱）'); });
     addOpt(currentBox, currentBox + '（今設定中の箱）');
-    const selVal = cam_itemBox(item);
-    let optHtml = opts.map(function(o) {
-      return '<option value="' + camEsc(o.v) + '"' + (o.v === selVal ? ' selected' : '') + '>' + camEsc(o.label) + '</option>';
-    }).join('');
-    optHtml += '<option value=""' + (selVal === '' ? ' selected' : '') + '>箱なし</option>';
-    boxRowHtml = '<div class="q-row"><span style="font-size:13px; font-weight:bold;">箱:</span>'
-      + '<select id="cam-box-' + item.id + '" style="' + cam_boxSelectStyle(item) + '" onchange="camSetBoxChoice(\'' + item.id + '\', this.value)">' + optHtml + '</select></div>';
+    if (destBusy) {
+      boxRowHtml = '<div class="q-row"><span style="font-size:13px; font-weight:bold;">箱:</span>'
+        + '<select disabled style="border:2px solid #9e9e9e; border-radius:6px; background-color:#eeeeee; color:#616161;"><option>箱を確認中…</option></select></div>';
+    } else {
+      const selVal = cam_itemBox(item);
+      let optHtml = opts.map(function(o) {
+        return '<option value="' + camEsc(o.v) + '"' + (o.v === selVal ? ' selected' : '') + '>' + camEsc(o.label) + '</option>';
+      }).join('');
+      optHtml += '<option value=""' + (selVal === '' ? ' selected' : '') + '>箱なし</option>';
+      boxRowHtml = '<div class="q-row"><span style="font-size:13px; font-weight:bold;">箱:</span>'
+        + '<select id="cam-box-' + item.id + '" style="' + cam_boxSelectStyle(item) + '" onchange="camSetBoxChoice(\'' + item.id + '\', this.value)">' + optHtml + '</select></div>';
+    }
   }
   const zNoteHtml = (camZFilter && item.zFilteredOut > 0) ? '<div style="font-size:12px; color:#6a1b9a; font-weight:bold; margin-bottom:4px;">🎯 ' + camZFilter + ' で絞り込み中（他 ' + item.zFilteredOut + ' 件を非表示）</div>' : '';
   // ★ 紐付き箱の表示（2026-11-26）: そのZと紐付いている箱（新しい順）。行き先取得後に表示される。
@@ -1216,7 +1233,7 @@ function camCandListHtml(item) {
     const selCls = i === item.selIndex ? ' selected' : '';
     const scoreTxt = item.qr ? '完全一致' : (r.score + '点');
     const modelTxt = r.displayModel || r.model || '';
-    const candBusy = item.candRegIdx === i;
+    const candBusy = item.candRegIdx === i || !!item.destPending;
     const candCtrl = r.isComplete
       ? '<span style="font-size:13px; font-weight:bold; color:#2e7d32;">✅ チェック完了</span>'
       : '<select id="cam-cand-qty-' + item.id + '-' + i + '" style="width:110px; flex:none; background-color:#f1f6fb;"' + (candBusy ? ' disabled' : '') + '>' + cam_qtyOptions(r, i === item.selIndex ? item.detectedQty : null) + '</select>'
