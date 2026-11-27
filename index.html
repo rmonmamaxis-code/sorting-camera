@@ -5,6 +5,7 @@
      OCR（Stage 11 の2パス）はこのページ内で行い、検索・登録・取消は ver.X の exec URL へ
      直接 fetch POST する（doPost）。GAS タブがバックグラウンド／閉じていても進む。
      直接つながらない場合のみ、元のアプリ（GAS タブ）への postMessage 経由へフォールバックする。
+     2026-11-27 Z番号が取れない物は Z0 として扱う（Zフィルタ・行き先の判定）。
      2026-11-27 省電力: 画面が見えていない間はカメラを止めて戻ったら再開。
        90秒操作が無ければ低フレームレート（10fps＋QR検出1秒間隔）に落とし、
        画面に触れると通常に戻す。
@@ -224,10 +225,11 @@ function cam_logClip(s) {
 function cam_zNoOf(r) {
   if (!r) return '';
   const head = String(r.number || '').trim().split('-')[0];
-  if (/^Z\d+$/i.test(head)) return head.toUpperCase();
+  if (/^Z\d+$/i.test(head)) { const h = head.toUpperCase(); return /^Z0+$/.test(h) ? 'Z0' : h; }
   const u = String(r.unitNo || '').trim().replace(/0+$/, '');
   if (/^Z\d+$/i.test(u)) return u.toUpperCase();
-  return '';
+  // ★ Z番号が取れない物は Z0 として扱う（2026-11-27）。
+  return 'Z0';
 }
 // 写真カード用: 選択中の候補のZ番号から行き先（箱番号管理表の対応）を引いて、
 // カードの箱の初期値にする。候補を切り替えたときも呼び直す。
@@ -552,7 +554,7 @@ function cam_normZ(v) {
   const s = String(v || '').trim().toUpperCase();
   if (!s) return '';
   const m = s.match(/^Z?(\d+)$/);
-  if (m) return 'Z' + m[1].padStart(2, '0');
+  if (m) { const n = parseInt(m[1], 10); return n === 0 ? 'Z0' : 'Z' + m[1].padStart(2, '0'); }
   return s;
 }
 function cam_applyZFilter(item) {
